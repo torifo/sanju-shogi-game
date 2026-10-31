@@ -1,4 +1,8 @@
 import './style.css';
+import { App } from './ui/app';
 
-const app = document.querySelector<HTMLDivElement>('#app');
-if (app) app.textContent = '三重将棋';
+const root = document.querySelector<HTMLElement>('#app');
+if (root) {
+  const app = new App(root);
+  window.addEventListener('pagehide', () => app.dispose(), { once: true });
+}
