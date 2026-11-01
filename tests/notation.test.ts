@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { formatMove, layerKeyGuide, layerLabel, layerName, layerNames } from '../src/core/notation';
+import { formatMove, kanjiNumber, layerKeyGuide, layerLabel, layerName, layerNames } from '../src/core/notation';
 import { createInitialPosition, defaultAssignment } from '../src/core/setup';
 import { SANJU } from '../src/core/config';
 import type { PieceType } from '../src/core/types';
 import { emptyPosition, put, sq } from './helpers';
+
+it('1から9を漢数字に変換する', () => {
+  expect(Array.from({ length: 9 }, (_, i) => kanjiNumber(i + 1)))
+    .toEqual(['一', '二', '三', '四', '五', '六', '七', '八', '九']);
+});
 
 describe('層の表示名と操作案内', () => {
   it('3層の表示名には層を一度だけ付ける', () => {

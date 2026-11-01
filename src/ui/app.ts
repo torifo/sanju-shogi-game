@@ -1,6 +1,6 @@
 import { SANJU } from '../core/config';
 import { Game } from '../core/game';
-import { layerName, layerNames } from '../core/notation';
+import { kanjiNumber, layerName, layerNames } from '../core/notation';
 import { isInCheck } from '../core/rules';
 import type { HandKind, Move, Square } from '../core/types';
 import type { BoardView } from '../render/scene';
@@ -55,7 +55,7 @@ export class App {
   private header(): HTMLElement {
     const config = this.screen === 'title' ? SANJU : this.game.config;
     const header = el('header', 'site-header');
-    header.append(el('span', 'brand', '三重将棋'), el('span', 'brand-sub', `SANJU SHOGI / ${config.files} × ${config.ranks} × ${config.layers}`));
+    header.append(el('span', 'brand', '三重将棋'), el('span', 'brand-sub', `SANJU SHOGI / ${kanjiNumber(config.files)} × ${kanjiNumber(config.ranks)} × ${kanjiNumber(config.layers)}`));
     if (this.screen !== 'title') header.append(button('タイトルへ', () => this.title(), 'quiet'));
     return header;
   }
@@ -108,7 +108,7 @@ export class App {
   private async mountBoard(screen: 'placement' | 'reveal' | 'game'): Promise<void> {
     this.resetScreen(screen);
     const main = el('main', 'play-screen'); const top = el('div', 'play-heading');
-    top.append(heading(screen === 'placement' ? '秘密配置' : screen === 'reveal' ? '同時公開' : '対局', screen === 'placement' && this.draft ? `${colorName(this.draft.color)}の配置` : screen === 'reveal' ? 'ふたつの布陣が、出会う。' : `${this.game.config.layers}層の盤`, screen === 'placement' ? '表示されるのは自分の駒だけです。20枚の層を自由に選んでください。' : '駒を選び、緑のマスへ。展開図からも同じ操作ができます。'));
+    top.append(heading(screen === 'placement' ? '秘密配置' : screen === 'reveal' ? '同時公開' : '対局', screen === 'placement' && this.draft ? `${colorName(this.draft.color)}の配置` : screen === 'reveal' ? 'ふたつの布陣が、出会う。' : `${kanjiNumber(this.game.config.layers)}層の盤`, screen === 'placement' ? '表示されるのは自分の駒だけです。20枚の層を自由に選んでください。' : '駒を選び、緑のマスへ。展開図からも同じ操作ができます。'));
     const status = el('div'); const controls = el('div'); const layout = el('div', 'board-layout');
     const left = el('aside', 'side-panel paper'); const center = el('section', 'board-center'); const right = el('aside', 'side-panel paper');
     const stage = el('div', 'board-stage'); const toolbar = el('div', 'view-toolbar'); const message = el('p', 'notice');

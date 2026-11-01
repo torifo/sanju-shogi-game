@@ -8,6 +8,10 @@ const NAMES: Record<PieceType, string> = {
 };
 const RANKS = ['一', '二', '三', '四', '五', '六', '七', '八', '九'];
 
+export function kanjiNumber(value: number): string {
+  return RANKS[value - 1] ?? String(value);
+}
+
 export function layerLabel(z: number, layers: number): string {
   return layers === 3 ? ['下', '中', '上'][z]! : `${z + 1}層`;
 }

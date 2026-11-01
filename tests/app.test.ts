@@ -134,6 +134,8 @@ describe('BFCacheからの復帰', () => {
     const { mountApp } = await import('../src/main'); dispose = mountApp(root);
     click('続きから');
     await vi.waitFor(() => expect(root.querySelectorAll('.mini-piece')).toHaveLength(40));
+    expect(root.querySelector('h1')!.textContent).toBe('三層の盤');
+    expect(root.querySelector('.brand-sub')!.textContent).toBe('SANJU SHOGI / 九 × 九 × 三');
     window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
     window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
     expect(root.querySelector('.title-screen')).not.toBeNull();
@@ -148,8 +150,8 @@ describe('9層の画面表示', () => {
     sceneModule(); localStorage.setItem(STORAGE_KEY, savedGame(9));
     await createApp(); click('続きから');
     await vi.waitFor(() => expect(root.querySelector('.view-toolbar select')).not.toBeNull());
-    expect(root.querySelector('h1')!.textContent).toBe('9層の盤');
-    expect(root.querySelector('.brand-sub')!.textContent).toBe('SANJU SHOGI / 9 × 9 × 9');
+    expect(root.querySelector('h1')!.textContent).toBe('九層の盤');
+    expect(root.querySelector('.brand-sub')!.textContent).toBe('SANJU SHOGI / 九 × 九 × 九');
     expect(root.querySelectorAll('.mini-layer')).toHaveLength(9);
     expect([...root.querySelectorAll('.mini-layer h3')].map(h => h.textContent)).toEqual(['9層', '8層', '7層', '6層', '5層', '4層', '3層', '2層', '1層']);
     expect([...root.querySelectorAll('select option')].map(o => o.textContent)).toEqual(['全層', '1層', '2層', '3層', '4層', '5層', '6層', '7層', '8層', '9層']);
