@@ -1,5 +1,5 @@
 import type { BoardConfig } from '../core/config';
-import { layerLabel } from '../core/notation';
+import { layerKeyGuide, layerName } from '../core/notation';
 import { defaultAssignment, randomAssignment, STANDARD_LAYOUT } from '../core/setup';
 import type { Color, Square } from '../core/types';
 import { PIECE_NAMES, type RenderPiece } from '../render/types';
@@ -30,12 +30,12 @@ export class Placement {
     panel.append(el('h2', '', selected ? `${selected.sq.x}筋の${PIECE_NAMES[selected.piece.type]}を配置` : '駒を選んで、層を決める'));
     const layers = el('div', 'button-row');
     for (let z = this.config.layers - 1; z >= 0; z--) {
-      const b = button(`${layerLabel(z, this.config.layers)}${this.config.layers === 3 ? '層' : ''} / ${z + 1}`, () => { this.setLayer(z); update(); });
+      const b = button(`${layerName(z, this.config.layers)} / ${z + 1}`, () => { this.setLayer(z); update(); });
       b.disabled = !selected; b.setAttribute('aria-pressed', String(selected?.sq.z === z)); layers.append(b);
     }
     const presets = el('div', 'button-row');
-    presets.append(button('全部を中層', () => { this.assignment = defaultAssignment(this.config); update(); }), button('ランダム', () => { this.assignment = randomAssignment(this.config); update(); }), button('配置を確定', submit, 'primary'));
-    panel.append(layers, el('p', 'muted', '数字キー 1＝下・2＝中・3＝上。駒を上下にドラッグしても変更できます。'), presets);
+    presets.append(button(`全部を${layerName(Math.floor(this.config.layers / 2), this.config.layers)}`, () => { this.assignment = defaultAssignment(this.config); update(); }), button('ランダム', () => { this.assignment = randomAssignment(this.config); update(); }), button('配置を確定', submit, 'primary'));
+    panel.append(layers, el('p', 'muted', `数字キー ${layerKeyGuide(this.config.layers)}。駒を上下にドラッグしても変更できます。`), presets);
     return panel;
   }
 }

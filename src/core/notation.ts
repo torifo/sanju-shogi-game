@@ -12,6 +12,19 @@ export function layerLabel(z: number, layers: number): string {
   return layers === 3 ? ['下', '中', '上'][z]! : `${z + 1}層`;
 }
 
+/** Full display name; layerLabel stays compact for move notation. */
+export function layerName(z: number, layers: number): string {
+  return layers === 3 ? `${layerLabel(z, layers)}層` : layerLabel(z, layers);
+}
+
+export function layerNames(layers: number): string[] {
+  return Array.from({ length: layers }, (_, z) => layerName(z, layers));
+}
+
+export function layerKeyGuide(layers: number): string {
+  return Array.from({ length: Math.min(layers, 9) }, (_, z) => `${z + 1}＝${layerLabel(z, layers)}`).join('・');
+}
+
 export function formatMove(pos: Position, move: Move): string {
   const prefix = `${pos.sideToMove === 'sente' ? '▲' : '△'}${move.to.x}${RANKS[move.to.y - 1]}`;
   const toLayer = layerLabel(move.to.z, pos.config.layers);

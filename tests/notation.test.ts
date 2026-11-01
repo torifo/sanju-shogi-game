@@ -1,9 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { formatMove, layerLabel } from '../src/core/notation';
+import { formatMove, layerKeyGuide, layerLabel, layerName, layerNames } from '../src/core/notation';
 import { createInitialPosition, defaultAssignment } from '../src/core/setup';
 import { SANJU } from '../src/core/config';
 import type { PieceType } from '../src/core/types';
 import { emptyPosition, put, sq } from './helpers';
+
+describe('層の表示名と操作案内', () => {
+  it('3層の表示名には層を一度だけ付ける', () => {
+    expect(layerNames(3)).toEqual(['下層', '中層', '上層']);
+    expect(layerKeyGuide(3)).toBe('1＝下・2＝中・3＝上');
+  });
+  it('9層の表示名とキー案内は1から9まで', () => {
+    expect(layerNames(9)).toEqual(['1層', '2層', '3層', '4層', '5層', '6層', '7層', '8層', '9層']);
+    expect(layerKeyGuide(9)).toBe('1＝1層・2＝2層・3＝3層・4＝4層・5＝5層・6＝6層・7＝7層・8＝8層・9＝9層');
+    expect(layerName(8, 9)).toBe('9層');
+  });
+});
 
 describe('棋譜表記', () => {
   it('3層は下中上、それ以外は1始まりの層番号', () => {

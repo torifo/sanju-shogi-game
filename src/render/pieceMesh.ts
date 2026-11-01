@@ -4,15 +4,20 @@ import { PIECE_NAMES, type RenderPiece } from './types';
 
 /** Resources are shared within one view and disposed with that view. */
 export class PieceFactory {
-  private readonly geometry: THREE.ExtrudeGeometry;
+  private readonly geometry!: THREE.ExtrudeGeometry;
   private readonly face = new THREE.PlaneGeometry(.68, .79);
   private readonly textures = new Map<PieceType, THREE.CanvasTexture>();
   constructor() {
-    const shape = new THREE.Shape();
-    shape.moveTo(-.36, -.4); shape.lineTo(.36, -.4); shape.lineTo(.30, .24);
-    shape.lineTo(0, .44); shape.lineTo(-.30, .24); shape.closePath();
-    this.geometry = new THREE.ExtrudeGeometry(shape, { depth: .10, bevelEnabled: true, bevelSize: .025, bevelThickness: .02, bevelSegments: 1, steps: 1 });
-    this.geometry.rotateX(-Math.PI / 2);
+    try {
+      const shape = new THREE.Shape();
+      shape.moveTo(-.36, -.4); shape.lineTo(.36, -.4); shape.lineTo(.30, .24);
+      shape.lineTo(0, .44); shape.lineTo(-.30, .24); shape.closePath();
+      this.geometry = new THREE.ExtrudeGeometry(shape, { depth: .10, bevelEnabled: true, bevelSize: .025, bevelThickness: .02, bevelSegments: 1, steps: 1 });
+      this.geometry.rotateX(-Math.PI / 2);
+    } catch (error) {
+      this.dispose();
+      throw error;
+    }
   }
   create({ sq, piece }: RenderPiece): THREE.Group {
     const group = new THREE.Group();
@@ -35,7 +40,7 @@ export class PieceFactory {
     group.userData.sq = { ...sq }; group.userData.layer = sq.z; return group;
   }
   dispose(): void {
-    this.geometry.dispose(); this.face.dispose();
+    this.geometry?.dispose(); this.face.dispose();
     for (const texture of this.textures.values()) texture.dispose();
     this.textures.clear();
   }

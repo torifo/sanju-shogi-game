@@ -1,4 +1,4 @@
-import { layerLabel } from '../core/notation';
+import { layerName } from '../core/notation';
 import type { Square } from '../core/types';
 import { PIECE_NAMES, RANKS, sameSquare, squareKey, type Highlights, type RenderPiece } from '../render/types';
 import { button, colorName, el } from './dom';
@@ -14,10 +14,10 @@ export class Minimap {
     this.element.classList.toggle('fallback', fallback);
     this.element.append(el('summary', '', fallback ? '展開図で操作' : '展開図を開く / 閉じる'), this.boards);
     for (let z = layers - 1; z >= 0; z--) {
-      const section = el('section', 'mini-layer'); section.append(el('h3', '', `${layerLabel(z, layers)}${layers === 3 ? '層' : ''}`));
+      const section = el('section', 'mini-layer'); section.append(el('h3', '', layerName(z, layers)));
       const coords = el('div', 'mini-files');
       for (let x = 9; x >= 1; x--) coords.append(el('span', '', String(x)));
-      const grid = el('div', 'mini-grid'); grid.setAttribute('role', 'group'); grid.setAttribute('aria-label', `${layerLabel(z, layers)}層の盤`);
+      const grid = el('div', 'mini-grid'); grid.setAttribute('role', 'group'); grid.setAttribute('aria-label', `${layerName(z, layers)}の盤`);
       for (let y = 1; y <= 9; y++) for (let x = 9; x >= 1; x--) {
         const sq = { x, y, z };
         const cell = button('', () => { if (!this.suppressClick) pick(sq); });
@@ -54,7 +54,7 @@ export class Minimap {
       } else { delete cell.dataset.piece; delete cell.dataset.color; }
       cell.classList.toggle('target', targets.has(key)); cell.classList.toggle('selected', sameSquare(highlights.selected, sq));
       cell.classList.toggle('last-move', last.has(key)); cell.classList.toggle('check', sameSquare(highlights.check, sq));
-      const name = `${layerLabel(z!, this.layers)}層 ${x}${RANKS[y! - 1]} ${piece ? `${colorName(piece.color)} ${PIECE_NAMES[piece.type]}` : '空き'}${targets.has(key) ? ' 移動先' : ''}`;
+      const name = `${layerName(z!, this.layers)} ${x}${RANKS[y! - 1]} ${piece ? `${colorName(piece.color)} ${PIECE_NAMES[piece.type]}` : '空き'}${targets.has(key) ? ' 移動先' : ''}`;
       cell.setAttribute('aria-label', name); cell.setAttribute('aria-pressed', String(sameSquare(highlights.selected, sq))); cell.title = name;
     }
   }

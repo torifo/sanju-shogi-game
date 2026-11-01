@@ -1,9 +1,9 @@
 import { SANJU } from '../core/config';
 import { Game } from '../core/game';
-import { layerLabel } from '../core/notation';
+import { layerName, layerNames } from '../core/notation';
 import { isInCheck } from '../core/rules';
 import type { HandKind, Move, Square } from '../core/types';
-import { BoardView, isWebGLAvailable } from '../render/scene';
+import type { BoardView } from '../render/scene';
 import type { CameraPreset } from '../render/camera';
 import { sameSquare, squareKey, type Highlights, type RenderPiece } from '../render/types';
 import { banner } from './banner';
@@ -53,8 +53,9 @@ export class App {
     this.selection = undefined; this.busy = false; this.screen = screen; this.root.replaceChildren();
   }
   private header(): HTMLElement {
+    const config = this.screen === 'title' ? SANJU : this.game.config;
     const header = el('header', 'site-header');
-    header.append(el('span', 'brand', '三重将棋'), el('span', 'brand-sub', 'SANJU SHOGI / 九 × 九 × 三'));
+    header.append(el('span', 'brand', '三重将棋'), el('span', 'brand-sub', `SANJU SHOGI / ${config.files} × ${config.ranks} × ${config.layers}`));
     if (this.screen !== 'title') header.append(button('タイトルへ', () => this.title(), 'quiet'));
     return header;
   }
@@ -104,22 +105,18 @@ export class App {
       this.draft = new Placement(this.game.config, color); this.mountBoard('placement'); this.update();
     })); this.root.querySelector<HTMLButtonElement>('.primary')?.focus();
   }
-  private mountBoard(screen: 'placement' | 'reveal' | 'game'): void {
+  private async mountBoard(screen: 'placement' | 'reveal' | 'game'): Promise<void> {
     this.resetScreen(screen);
     const main = el('main', 'play-screen'); const top = el('div', 'play-heading');
-    top.append(heading(screen === 'placement' ? '秘密配置' : screen === 'reveal' ? '同時公開' : '対局', screen === 'placement' && this.draft ? `${colorName(this.draft.color)}の配置` : screen === 'reveal' ? 'ふたつの布陣が、出会う。' : '三層の盤', screen === 'placement' ? '表示されるのは自分の駒だけです。20枚の層を自由に選んでください。' : '駒を選び、緑のマスへ。展開図からも同じ操作ができます。'));
+    top.append(heading(screen === 'placement' ? '秘密配置' : screen === 'reveal' ? '同時公開' : '対局', screen === 'placement' && this.draft ? `${colorName(this.draft.color)}の配置` : screen === 'reveal' ? 'ふたつの布陣が、出会う。' : `${this.game.config.layers}層の盤`, screen === 'placement' ? '表示されるのは自分の駒だけです。20枚の層を自由に選んでください。' : '駒を選び、緑のマスへ。展開図からも同じ操作ができます。'));
     const status = el('div'); const controls = el('div'); const layout = el('div', 'board-layout');
     const left = el('aside', 'side-panel paper'); const center = el('section', 'board-center'); const right = el('aside', 'side-panel paper');
     const stage = el('div', 'board-stage'); const toolbar = el('div', 'view-toolbar'); const message = el('p', 'notice');
     stage.append(el('span', 'stage-caption', '三重将棋 / 3D BOARD'));
-    this.fallback = !isWebGLAvailable();
-    if (!this.fallback) {
-      try {
-        this.view = new BoardView(stage, { layers: this.game.config.layers, layerGap: 2.2 });
-        this.view.onPick(({ sq }) => { void this.pick(sq); });
-        if (screen === 'placement') this.view.onLayerDrag((sq, delta) => { this.draft?.drag(sq, delta); this.update(); });
-      } catch { this.fallback = true; this.view?.dispose(); this.view = undefined; stage.querySelector('canvas')?.remove(); }
-    }
+    const epoch = this.epoch;
+    this.fallback = false;
+    toolbar.hidden = true;
+    const loading = el('p', '', '盤を準備しています'); loading.setAttribute('role', 'status'); stage.append(loading);
     const makeMinimap = (): void => {
       this.minimap?.element.remove();
       this.minimap = new Minimap(this.game.config.layers, sq => { void this.pick(sq); }, screen === 'placement' ? (sq, delta) => { this.draft?.drag(sq, delta); this.update(); } : undefined, this.fallback);
@@ -131,10 +128,22 @@ export class App {
       stage.replaceChildren(el('p', '', '3D表示を利用できません。下の展開図で、配置から対局まですべて操作できます。'));
     };
     stage.addEventListener('board-context-lost', () => { fallback(); makeMinimap(); this.update(); }, { signal: this.screenEvents.signal });
-    if (this.fallback) fallback();
-    else this.buildViewToolbar(toolbar);
     center.append(stage, toolbar); makeMinimap(); layout.append(left, center, right); main.append(top, status, layout, controls, message);
     this.panels = { status, controls, left, right, message }; this.root.append(this.header(), main);
+    try {
+      const { BoardView, isWebGLAvailable } = await import('../render/scene');
+      if (epoch !== this.epoch) return;
+      if (!isWebGLAvailable()) { fallback(); makeMinimap(); this.update(); return; }
+      stage.replaceChildren(el('span', 'stage-caption', '三重将棋 / 3D BOARD'));
+      this.view = new BoardView(stage, { layers: this.game.config.layers, layerGap: 2.2 });
+      this.view.onPick(({ sq }) => { void this.pick(sq); });
+      if (screen === 'placement') this.view.onLayerDrag((sq, delta) => { this.draft?.drag(sq, delta); this.update(); });
+      this.buildViewToolbar(toolbar); toolbar.hidden = false;
+      this.update();
+    } catch {
+      if (epoch !== this.epoch) return;
+      fallback(); makeMinimap(); this.update();
+    }
   }
   private buildViewToolbar(toolbar: HTMLElement): void {
     const camera = el('div', 'toolbar-group'); camera.append(el('span', '', '視点'));
@@ -146,7 +155,7 @@ export class App {
     }
     const focus = el('label', 'toolbar-group'); focus.append(el('span', '', '注目'));
     const select = el('select'); select.setAttribute('aria-label', '注目する層'); select.append(new Option('全層', 'all'));
-    for (let z = 0; z < this.game.config.layers; z++) select.append(new Option(`${layerLabel(z, this.game.config.layers)}層`, String(z)));
+    for (let z = 0; z < this.game.config.layers; z++) select.append(new Option(layerName(z, this.game.config.layers), String(z)));
     select.addEventListener('change', () => this.view?.setFocusLayer(select.value === 'all' ? null : Number(select.value))); focus.append(select);
     const gap = button('間隔を広げる', () => { const wide = gap.getAttribute('aria-pressed') !== 'true'; gap.setAttribute('aria-pressed', String(wide)); gap.textContent = wide ? '間隔を戻す' : '間隔を広げる'; this.view?.setLayerGap(wide ? 3.5 : 2.2); }); gap.setAttribute('aria-pressed', 'false');
     toolbar.append(camera, focus, gap);
@@ -177,7 +186,7 @@ export class App {
     if (this.screen === 'placement' && this.draft) {
       status.replaceChildren(el('p', 'status-banner', `${colorName(this.draft.color)}のみ表示中 — 相手の配置は非公開です`));
       controls.replaceChildren(this.draft.controls(() => this.update(), () => this.submitPlacement()));
-      left.replaceChildren(el('h2', '', '配置の手順'), el('p', '', '1. 駒を選ぶ\n2. 上・中・下を選ぶ\n3. 20枚を確認して確定'));
+      left.replaceChildren(el('h2', '', '配置の手順'), el('p', '', `1. 駒を選ぶ\n2. ${layerNames(this.game.config.layers).reverse().join('・')}を選ぶ\n3. 20枚を確認して確定`));
       right.replaceChildren(el('h2', '', '自由な布陣'), el('p', '', '初期位置の筋と段は固定です。すべて同じ層でも、ランダムでも構いません。'));
     } else if (this.screen === 'reveal') {
       status.replaceChildren(el('p', 'status-banner', '両者の配置を公開しています…'));
@@ -207,7 +216,9 @@ export class App {
     }
   }
   private async reveal(): Promise<void> {
-    this.mountBoard('reveal'); this.update(); const epoch = this.epoch;
+    const mounting = this.mountBoard('reveal'); this.update(); const epoch = this.epoch;
+    await mounting;
+    if (this.epoch !== epoch) return;
     const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
     // Both renderers receive both sides for the first time only in this public screen.
     this.minimap?.element.classList.add('revealing');
@@ -256,6 +267,7 @@ export class App {
     if (this.panels) { this.panels.message.textContent = error instanceof Error ? error.message : '操作できませんでした。もう一度お試しください。'; this.panels.message.setAttribute('role', 'alert'); }
   }
   dispose(): void {
-    this.resetScreen('title'); this.unsubscribe?.(); this.events.abort();
+    this.resetScreen('title'); this.unsubscribe?.(); this.unsubscribe = undefined; this.events.abort();
+    this.draft = undefined; this.legal = []; this.game = new Game(SANJU);
   }
 }

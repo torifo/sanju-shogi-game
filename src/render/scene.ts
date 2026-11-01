@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { Square } from '../core/types';
 import { createBoard, disposeGroup } from './boardMesh';
 import { CameraRig, type CameraPreset } from './camera';
+import { createPointerGesture } from './gesture';
 import { createHighlights } from './highlights';
 import { pickSquare } from './picking';
 import { PieceFactory } from './pieceMesh';
@@ -15,10 +16,10 @@ export function isWebGLAvailable(): boolean {
   } catch { return false; }
 }
 export class BoardView {
-  private readonly renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  private readonly renderer!: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
-  private readonly rig: CameraRig;
-  private readonly factory = new PieceFactory();
+  private readonly rig!: CameraRig;
+  private readonly factory!: PieceFactory;
   private readonly boards: THREE.Group[] = [];
   private pieces = new THREE.Group();
   private lines = new THREE.Group();
@@ -28,56 +29,65 @@ export class BoardView {
   private focus: number | null = null;
   private gap: number;
   private preset: CameraPreset = 'oblique';
-  private observer: ResizeObserver;
+  private observer?: ResizeObserver;
   private frame = 0;
   private disposed = false;
   private pick: (hit: { sq: Square }) => void = () => {};
   private drag?: (sq: Square, delta: number) => void;
   private cancelReveal?: () => void;
-  private pointer?: { id: number; x: number; y: number; hit: ReturnType<typeof pickSquare> };
   private readonly events = new AbortController();
   constructor(container: HTMLElement, readonly opts: BoardViewOptions) {
     this.gap = opts.layerGap;
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); this.renderer.setClearColor('#000000', 0);
-    this.renderer.domElement.setAttribute('aria-label', '三層の将棋盤。ドラッグで回転、展開図からも操作できます');
-    container.append(this.renderer.domElement); this.rig = new CameraRig(this.renderer.domElement);
-    this.scene.add(new THREE.AmbientLight('#fff5df', 2.5));
-    const light = new THREE.DirectionalLight('#ffffff', 3); light.position.set(3, 15, 8); this.scene.add(light);
-    for (let z = 0; z < opts.layers; z++) {
-      const board = createBoard(z); board.position.y = z * this.gap; this.boards.push(board); this.scene.add(board);
+    try {
+      this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      this.factory = new PieceFactory();
+      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); this.renderer.setClearColor('#000000', 0);
+      this.renderer.domElement.setAttribute('aria-label', `${opts.layers}層の将棋盤。ドラッグで回転、展開図からも操作できます`);
+      container.append(this.renderer.domElement); this.rig = new CameraRig(this.renderer.domElement);
+      this.scene.add(new THREE.AmbientLight('#fff5df', 2.5));
+      const light = new THREE.DirectionalLight('#ffffff', 3); light.position.set(3, 15, 8); this.scene.add(light);
+      for (let z = 0; z < opts.layers; z++) {
+        const board = createBoard(z); board.position.y = z * this.gap; this.boards.push(board); this.scene.add(board);
+      }
+      this.scene.add(this.pieces, this.lines, this.highlights); this.rig.preset(this.preset, (opts.layers - 1) * this.gap);
+      let lastWidth = 0, lastHeight = 0;
+      const resize = (): void => {
+        const width = container.clientWidth; const height = container.clientHeight;
+        if (!width || !height || (width === lastWidth && height === lastHeight)) return;
+        lastWidth = width; lastHeight = height;
+        this.renderer.setSize(width, height); this.rig.camera.aspect = width / height; this.rig.camera.updateProjectionMatrix();
+        this.rig.fit((this.opts.layers - 1) * this.gap);
+      };
+      this.observer = new ResizeObserver(resize); this.observer.observe(container);
+      const canvas = this.renderer.domElement;
+      const gesture = createPointerGesture();
+      let startHit: ReturnType<typeof pickSquare>;
+      const hit = (e: PointerEvent): ReturnType<typeof pickSquare> => pickSquare(e, canvas, this.rig.camera, this.pieces.children, this.highlights.children, this.boards, this.focus);
+      canvas.addEventListener('pointerdown', e => {
+        canvas.setPointerCapture(e.pointerId);
+        startHit = gesture.down(e) ? hit(e) : null;
+        this.rig.controls.enabled = !(this.drag && startHit?.piece);
+      }, { signal: this.events.signal });
+      canvas.addEventListener('pointermove', e => gesture.move(e), { signal: this.events.signal });
+      canvas.addEventListener('pointerup', e => {
+        const result = gesture.up(e); const picked = startHit; startHit = null; this.rig.controls.enabled = true;
+        if (!result || !picked) return;
+        if (this.drag && picked.piece && Math.abs(result.dy) > 28) this.drag(picked.sq, result.dy < 0 ? 1 : -1);
+        else if (result.click) this.pick({ sq: picked.sq });
+      }, { signal: this.events.signal });
+      canvas.addEventListener('pointercancel', e => { gesture.cancel(e.pointerId); startHit = null; this.rig.controls.enabled = true; }, { signal: this.events.signal });
+      canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); container.dispatchEvent(new CustomEvent('board-context-lost')); }, { signal: this.events.signal });
+      const loop = (): void => {
+        if (this.disposed) return;
+        this.rig.controls.update(); this.renderer.render(this.scene, this.rig.camera); this.frame = requestAnimationFrame(loop);
+      };
+      // UIがコンテナをDOMへ追加した後、最初のフレームも正しいサイズで必ず描く。
+      this.frame = requestAnimationFrame(() => { resize(); loop(); });
+    } catch (error) {
+      // Construction may fail before the caller receives a view to dispose.
+      this.dispose();
+      throw error;
     }
-    this.scene.add(this.pieces, this.lines, this.highlights); this.rig.preset(this.preset, (opts.layers - 1) * this.gap);
-    let lastWidth = 0, lastHeight = 0;
-    const resize = (): void => {
-      const width = container.clientWidth; const height = container.clientHeight;
-      if (!width || !height || (width === lastWidth && height === lastHeight)) return;
-      lastWidth = width; lastHeight = height;
-      this.renderer.setSize(width, height); this.rig.camera.aspect = width / height; this.rig.camera.updateProjectionMatrix();
-      this.rig.fit((this.opts.layers - 1) * this.gap);
-    };
-    this.observer = new ResizeObserver(resize); this.observer.observe(container);
-    const canvas = this.renderer.domElement;
-    const hit = (e: PointerEvent): ReturnType<typeof pickSquare> => pickSquare(e, canvas, this.rig.camera, this.pieces.children, this.highlights.children, this.boards, this.focus);
-    canvas.addEventListener('pointerdown', e => {
-      if (!e.isPrimary || e.button !== 0) return;
-      this.pointer = { id: e.pointerId, x: e.clientX, y: e.clientY, hit: hit(e) };
-      if (this.drag && this.pointer.hit?.piece) this.rig.controls.enabled = false;
-    }, { signal: this.events.signal });
-    canvas.addEventListener('pointerup', e => {
-      const start = this.pointer; this.pointer = undefined; this.rig.controls.enabled = true;
-      if (!start || e.pointerId !== start.id) return;
-      const dy = e.clientY - start.y;
-      if (this.drag && start.hit?.piece && Math.abs(dy) > 28) this.drag(start.hit.sq, dy < 0 ? 1 : -1);
-      else if (Math.hypot(e.clientX - start.x, dy) < 8 && start.hit) this.pick({ sq: start.hit.sq });
-    }, { signal: this.events.signal });
-    canvas.addEventListener('pointercancel', () => { this.pointer = undefined; this.rig.controls.enabled = true; }, { signal: this.events.signal });
-    canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); container.dispatchEvent(new CustomEvent('board-context-lost')); }, { signal: this.events.signal });
-    const loop = (): void => {
-      if (this.disposed) return;
-      this.rig.controls.update(); this.renderer.render(this.scene, this.rig.camera); this.frame = requestAnimationFrame(loop);
-    };
-    // UIがコンテナをDOMへ追加した後、最初のフレームも正しいサイズで必ず描く。
-    this.frame = requestAnimationFrame(() => { resize(); loop(); });
   }
   setPieces(pieces: RenderPiece[]): void {
     this.data = pieces.map(p => ({ sq: { ...p.sq }, piece: { ...p.piece } }));
@@ -130,9 +140,11 @@ export class BoardView {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true; this.cancelReveal?.(); cancelAnimationFrame(this.frame);
-    this.observer.disconnect(); this.events.abort(); this.rig.dispose();
+    this.observer?.disconnect(); this.events.abort(); this.rig?.dispose();
     for (const board of this.boards) disposeGroup(board);
-    disposeGroup(this.pieces, false); disposeGroup(this.lines); disposeGroup(this.highlights); this.factory.dispose();
-    this.renderer.dispose(); this.renderer.forceContextLoss(); this.renderer.domElement.remove();
+    disposeGroup(this.pieces, false); disposeGroup(this.lines); disposeGroup(this.highlights); this.factory?.dispose();
+    if (this.renderer) {
+      this.renderer.dispose(); this.renderer.forceContextLoss(); this.renderer.domElement.remove();
+    }
   }
 }
