@@ -1,4 +1,5 @@
 import { Game } from './game';
+import { validateAssignment } from './setup';
 import { opposite, type Color, type HandKind, type Move, type Square } from './types';
 
 export interface SavedGame {
@@ -51,13 +52,16 @@ export function saveGame(g: Game): SavedGame {
 export function loadGame(data: unknown): Game {
   if (typeof data !== 'object' || data === null || Array.isArray(data)) throw new Error('保存形式が不正です');
   const d = data as Record<string, unknown>;
-  if (d.v !== 1 || typeof d.layers !== 'number' || !Number.isSafeInteger(d.layers) || d.layers < 1
+  if (d.v !== 1 || (d.layers !== 3 && d.layers !== 9)
     || !Array.isArray(d.sente) || !Array.isArray(d.gote) || !Array.isArray(d.moves)
     || (d.resigned !== undefined && d.resigned !== 'sente' && d.resigned !== 'gote')) {
     throw new Error('保存形式またはバージョンが不正です');
   }
-  const game = new Game({ files: 9, ranks: 9, layers: d.layers });
-  // 配置の長さ・整数・範囲は submitPlacement が検証する。
+  const config = { files: 9, ranks: 9, layers: d.layers } as const;
+  if (!validateAssignment(config, d.sente) || !validateAssignment(config, d.gote)) {
+    throw new Error('層の割り当てが不正です');
+  }
+  const game = new Game(config);
   game.submitPlacement('sente', d.sente);
   game.submitPlacement('gote', d.gote);
   for (const text of d.moves) {

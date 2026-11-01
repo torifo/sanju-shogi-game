@@ -14,7 +14,7 @@ export class Position {
   sideToMove: Color = 'sente';
 
   constructor(config: BoardConfig) {
-    if (config.files !== 9 || config.ranks !== 9 || !Number.isSafeInteger(config.layers) || config.layers < 1) {
+    if (config.files !== 9 || config.ranks !== 9 || (config.layers !== 3 && config.layers !== 9)) {
       throw new Error('盤の設定が不正です');
     }
     this.config = { ...config };

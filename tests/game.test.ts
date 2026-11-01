@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import * as hashing from '../src/core/hash';
 import { Game } from '../src/core/game';
 import type { GameEvent } from '../src/core/game';
 import { hashPosition } from '../src/core/hash';
@@ -18,7 +19,7 @@ const move = (fx: number, fy: number, fz: number, tx: number, ty: number, tz: nu
   ({ kind: 'move', from: sq(fx, fy, fz), to: sq(tx, ty, tz), promote: false });
 
 describe.each([3, 9])('%i層の対局', layers => {
-  it('配置は先手→後手。確定前の相手の割り当ては返さない', () => {
+  it('配置は先手→後手。公開前は現在の配置側以外の割り当てを返さない', () => {
     const game = new Game({ files: 9, ranks: 9, layers });
     const a = defaultAssignment(game.config);
     expect(game.phase).toEqual({ kind: 'placing', color: 'sente' });
@@ -30,16 +31,19 @@ describe.each([3, 9])('%i層の対局', layers => {
     expect(() => game.submitPlacement('sente', [0])).toThrow();
     game.submitPlacement('sente', a);
     expect(game.phase).toEqual({ kind: 'placing', color: 'gote' });
-    expect(game.placement('sente')).toEqual(a);
+    expect(game.placement('sente')).toBeNull();
     expect(game.placement('gote')).toBeNull();
     expect(game.position).toBeNull();
     a[0] = 0;
+    game.submitPlacement('gote', a);
     expect(game.placement('sente')?.[0]).toBe(Math.floor(layers / 2));
     game.placement('sente')![1] = 0;
     expect(game.placement('sente')?.[1]).toBe(Math.floor(layers / 2));
-    game.submitPlacement('gote', a);
     expect(game.phase).toEqual({ kind: 'playing' });
     expect(game.position?.sideToMove).toBe('sente');
+    expect(game.placement('gote')).toEqual(a);
+    game.resign('gote');
+    expect(game.placement('sente')?.[0]).toBe(Math.floor(layers / 2));
     expect(game.placement('gote')).toEqual(a);
     expect(() => game.submitPlacement('sente', a)).toThrow();
   });
@@ -170,6 +174,51 @@ describe('対局の通知と開始前の操作', () => {
 });
 
 describe('局面ハッシュ', () => {
+  it('竜・銀と成銀・飛を置いた衝突局面を区別する', () => {
+    const a = emptyPosition();
+    put(a, 5, 9, 0, 'K', 'sente');
+    put(a, 1, 9, 2, 'K', 'gote');
+    put(a, 9, 1, 0, '+R', 'sente');
+    put(a, 6, 1, 1, 'S', 'sente');
+    const b = a.clone();
+    put(b, 9, 1, 0, '+S', 'sente');
+    put(b, 6, 1, 1, 'R', 'sente');
+    expect(hashPosition(a)).not.toBe(hashPosition(b));
+  });
+  it.each([false, true])('9層の72手の交換で異なる局面を合算しない（強制ハッシュ衝突: %s）', forceCollision => {
+    const spy = forceCollision ? vi.spyOn(hashing, 'hashPosition').mockReturnValue('collision') : undefined;
+    try {
+      const game = startedGame(9);
+      const pos = emptyPosition(9);
+      put(pos, 9, 9, 0, 'K', 'sente');
+      put(pos, 1, 9, 0, 'K', 'gote');
+      put(pos, 3, 2, 6, '+R', 'sente');
+      put(pos, 9, 4, 7, '+S', 'sente');
+      game.position = pos;
+      // 竜を退避し、成銀を横移動＋段移動で運び、竜を反対側へ。先手12手で交換。
+      const swap = [move(3, 2, 6, 3, 1, 6), move(3, 1, 6, 3, 4, 6),
+        ...Array.from({ length: 6 }, (_, i) => move(9 - i, 4, 7, 8 - i, 4, 7)),
+        move(3, 4, 7, 3, 3, 7), move(3, 3, 7, 3, 2, 6),
+        move(3, 4, 6, 9, 4, 6), move(9, 4, 6, 9, 4, 7)];
+      const restore = [...swap].reverse().map(m => {
+        if (m.kind !== 'move') throw new Error('交換は移動手のみ');
+        return { ...m, from: m.to, to: m.from };
+      });
+      const exactKey = (): string => JSON.stringify([pos.cells, pos.hands, pos.sideToMove]);
+      const counts = new Map<string, number>([[exactKey(), 1]]);
+      const record = (): void => { const key = exactKey(); counts.set(key, (counts.get(key) ?? 0) + 1); };
+      for (const sequence of [swap, restore, swap]) {
+        for (const m of sequence) {
+          game.play(m); record();
+          const x = pos.findKing('gote')!.x;
+          game.play(move(x, 9, 0, x === 1 ? 2 : 1, 9, 0)); record();
+        }
+      }
+      expect(game.moves).toHaveLength(72);
+      expect(Math.max(...counts.values())).toBeLessThanOrEqual(3);
+      expect(game.phase).toEqual({ kind: 'playing' });
+    } finally { spy?.mockRestore(); }
+  });
   it.each([3, 9])('%i層で盤・成り・所有者・持ち駒の数と所有者・手番を区別する', layers => {
     const pos = emptyPosition(layers);
     put(pos, 5, 5, 1, 'P', 'sente');

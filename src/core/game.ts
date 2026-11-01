@@ -1,5 +1,5 @@
 import type { BoardConfig } from './config';
-import { hashPosition } from './hash';
+import { hashPosition, positionKey } from './hash';
 import { formatMove } from './notation';
 import { Position, type Undo } from './position';
 import { generateLegalMoves, isInCheck, isLegalMove, status } from './rules';
@@ -15,6 +15,7 @@ export type Result =
   | { kind: 'draw'; reason: 'repetition' };
 export interface GameEvent { type: 'phase' | 'move' | 'undo' }
 interface HistoryEntry { undo: Undo; mover: Color; check: boolean }
+const identify = (pos: Position): { hash: string; key: string } => ({ hash: hashPosition(pos), key: positionKey(pos) });
 
 export class Game {
   readonly config: BoardConfig;
@@ -24,8 +25,8 @@ export class Game {
   readonly notation: string[] = [];
   private readonly assignments: Record<Color, number[] | null> = { sente: null, gote: null };
   private readonly history: HistoryEntry[] = [];
-  /** hashes[0] は初期局面、hashes[n] は n 手目の直後。 */
-  private hashes: string[] = [];
+  /** positions[0] は初期局面、positions[n] は n 手目の直後。 */
+  private positions: ReturnType<typeof identify>[] = [];
   private readonly listeners = new Set<(e: GameEvent) => void>();
 
   constructor(config: BoardConfig) {
@@ -48,7 +49,7 @@ export class Game {
   }
 
   placement(color: Color): number[] | null {
-    // 計画のAPIに従い、確定済みの割り当てのみ返す。相手画面への非表示はUIが担う。
+    if (this.phase.kind === 'placing' && this.phase.color !== color) return null;
     const a = this.assignments[color];
     return a ? [...a] : null;
   }
@@ -65,13 +66,13 @@ export class Game {
     const recorded = structuredClone(move);
     const text = formatMove(pos, recorded);
     // 初手の直前を記録するので、テスト用に差し替えた局面も同じ進行処理を使える。
-    if (this.history.length === 0) this.hashes = [hashPosition(pos)];
+    if (this.history.length === 0) this.positions = [identify(pos)];
     const mover = pos.sideToMove;
     const undo = pos.apply(recorded);
     this.history.push({ undo, mover, check: isInCheck(pos, pos.sideToMove) });
     this.moves.push(structuredClone(recorded));
     this.notation.push(text);
-    this.hashes.push(hashPosition(pos));
+    this.positions.push(identify(pos));
     const current = status(pos);
     if (current.kind !== 'ongoing') {
       this.phase = { kind: 'ended', result: { kind: 'win', winner: current.winner, reason: current.kind } };
@@ -84,8 +85,9 @@ export class Game {
   }
 
   private repetitionResult(): Result | null {
-    const latest = this.hashes[this.hashes.length - 1]!;
-    const occurrences = this.hashes.flatMap((hash, i) => hash === latest ? [i] : []);
+    const latest = this.positions[this.positions.length - 1]!;
+    const occurrences = this.positions.flatMap((entry, i) =>
+      entry.hash === latest.hash && entry.key === latest.key ? [i] : []);
     if (occurrences.length < 4) return null;
     const interval = this.history.slice(occurrences[0]!);
     for (const color of ['sente', 'gote'] as const) {
@@ -105,7 +107,7 @@ export class Game {
       this.position.undo(entry.undo);
       this.moves.pop();
       this.notation.pop();
-      this.hashes.pop();
+      this.positions.pop();
     }
     this.phase = { kind: 'playing' };
     this.emit('undo');

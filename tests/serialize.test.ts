@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import * as gameModule from '../src/core/game';
 import { Game } from '../src/core/game';
 import { hashPosition } from '../src/core/hash';
 import { decodeMove, encodeMove, loadGame, saveGame } from '../src/core/serialize';
@@ -92,6 +93,25 @@ describe.each([3, 9])('%i層の保存と再開', layers => {
 });
 
 describe('保存データの検証', () => {
+  it('非対応・巨大な層数や不正な配置を盤の生成前に拒否する', () => {
+    const valid = saveGame(startedGame());
+    const constructor = vi.spyOn(gameModule, 'Game').mockImplementation(function () {
+      throw new Error('検証より先に盤を生成しています');
+    });
+    try {
+      for (const data of [
+        { v: 1, layers: 10_000_000, sente: [], gote: [], moves: [] },
+        ...[1, 2, 4, 8, 10, 10_000_000].map(layers => ({ ...valid, layers })),
+      ]) expect(() => loadGame(data)).toThrow('保存形式またはバージョンが不正です');
+      for (const assignment of [[], Array(19).fill(1), Array(21).fill(1), Array(20),
+        Array(20).fill(-1), Array(20).fill(3), Array(20).fill(0.5), Array(20).fill('1')]) {
+        for (const color of ['sente', 'gote']) {
+          expect(() => loadGame({ ...valid, [color]: assignment })).toThrow('層の割り当てが不正です');
+        }
+      }
+      expect(constructor).not.toHaveBeenCalled();
+    } finally { constructor.mockRestore(); }
+  });
   it.each([{}, null, [], 'text', { v: 2 }, { v: 1, layers: 0 }, { v: 1, layers: 3.5 }])('%jを拒否', data => {
     expect(() => loadGame(data)).toThrow();
   });

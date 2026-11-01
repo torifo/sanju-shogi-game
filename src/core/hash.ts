@@ -1,38 +1,51 @@
 import type { Position } from './position';
-import type { HandKind } from './types';
+import type { HandKind, PieceType } from './types';
 
 type Key = readonly [number, number];
-const table = new Map<string, Key>();
+const COLORS = ['sente', 'gote'] as const;
+const HAND_KINDS: readonly HandKind[] = ['R', 'B', 'G', 'S', 'N', 'L', 'P'];
+const PIECE_TYPES: readonly PieceType[] = ['K', ...HAND_KINDS, '+R', '+B', '+S', '+N', '+L', '+P'];
 
-/** 固定シードから特徴ごとの64bit相当のZobristキーを遅延生成する。
- * 参照順や対局の履歴によらず、同じ特徴には同じキーを返す。 */
-function key(feature: string): Key {
-  const cached = table.get(feature);
-  if (cached) return cached;
-  let lowSeed = 0x811c9dc5;
-  let highSeed = 0x9e3779b9;
-  for (let i = 0; i < feature.length; i++) {
-    const code = feature.charCodeAt(i);
-    lowSeed = Math.imul(lowSeed ^ code, 0x01000193);
-    highSeed = Math.imul(highSeed ^ code, 0x85ebca6b);
-  }
-  const random = (seed: number): number => {
-    if (seed === 0) seed = 0x6d2b79f5;
-    seed ^= seed << 13;
-    seed ^= seed >>> 17;
-    seed ^= seed << 5;
-    return seed >>> 0;
+/** 固定シードの xorshift128。特徴を固定順に列挙し、文字列ハッシュの代数的な衝突を避ける。
+ * 表は先に生成するため、局面を参照する順序には依存しない。 */
+function createTable(): Map<string, Key> {
+  const table = new Map<string, Key>();
+  let x = 123456789, y = 362436069, z = 521288629, w = 88675123;
+  const next = (): number => {
+    const t = x ^ (x << 11);
+    x = y; y = z; z = w;
+    w = (w ^ (w >>> 19) ^ t ^ (t >>> 8)) >>> 0;
+    return w;
   };
-  const value: Key = [random(lowSeed), random(highSeed)];
-  table.set(feature, value);
-  return value;
+  const add = (feature: string): void => { table.set(feature, [next(), next()]); };
+  for (const layers of [3, 9]) add(`board:9:9:${layers}`);
+  add('turn:gote');
+  for (let i = 0; i < 81 * 9; i++) {
+    for (const color of COLORS) for (const type of PIECE_TYPES) add(`piece:${i}:${color}:${type}`);
+  }
+  // 枚数は二進表現の各ビットで区別する（Number の安全な整数の全範囲）。
+  for (const color of COLORS) for (const kind of HAND_KINDS) {
+    for (let bit = 0; bit < 53; bit++) add(`hand:${color}:${kind}:${bit}`);
+  }
+  return table;
+}
+const table = createTable();
+
+/** 千日手の最終照合用。駒や持ち駒オブジェクトのプロパティ順序には依存しない。 */
+export function positionKey(pos: Position): string {
+  return JSON.stringify([
+    pos.config.files, pos.config.ranks, pos.config.layers,
+    pos.cells.map(piece => piece ? [piece.color, piece.type] : null),
+    COLORS.map(color => HAND_KINDS.map(kind => pos.hands[color][kind])),
+    pos.sideToMove,
+  ]);
 }
 
 export function hashPosition(pos: Position): string {
   let low = 0;
   let high = 0;
   const add = (feature: string): void => {
-    const pair = key(feature);
+    const pair = table.get(feature)!;
     low ^= pair[0];
     high ^= pair[1];
   };
@@ -41,10 +54,12 @@ export function hashPosition(pos: Position): string {
   pos.cells.forEach((piece, i) => {
     if (piece) add(`piece:${i}:${piece.color}:${piece.type}`);
   });
-  for (const color of ['sente', 'gote'] as const) {
-    for (const kind of Object.keys(pos.hands[color]) as HandKind[]) {
-      const count = pos.hands[color][kind];
-      if (count !== 0) add(`hand:${color}:${kind}:${count}`);
+  for (const color of COLORS) {
+    for (const kind of HAND_KINDS) {
+      let count = pos.hands[color][kind];
+      for (let bit = 0; count > 0; bit++, count = Math.floor(count / 2)) {
+        if (count % 2 === 1) add(`hand:${color}:${kind}:${bit}`);
+      }
     }
   }
   const hex = (n: number): string => (n >>> 0).toString(16).padStart(8, '0');

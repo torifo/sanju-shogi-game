@@ -183,7 +183,7 @@ export class App {
       status.replaceChildren(el('p', 'status-banner', '両者の配置を公開しています…'));
       left.replaceChildren(el('h2', '', '先手')); right.replaceChildren(el('h2', '', '後手')); controls.replaceChildren();
     } else if (this.screen === 'game') {
-      status.replaceChildren(banner(this.game));
+      status.replaceChildren(banner(this.game, this.selection !== undefined));
       const selectedHand = this.selection?.kind === 'hand' ? this.selection.piece : undefined;
       left.replaceChildren(hands(this.game, 'sente', selectedHand, p => this.selectHand(p)));
       right.replaceChildren(hands(this.game, 'gote', selectedHand, p => this.selectHand(p)), moveLog(this.game.notation));

@@ -47,11 +47,15 @@ export class BoardView {
       const board = createBoard(z); board.position.y = z * this.gap; this.boards.push(board); this.scene.add(board);
     }
     this.scene.add(this.pieces, this.lines, this.highlights); this.rig.preset(this.preset, (opts.layers - 1) * this.gap);
-    this.observer = new ResizeObserver(() => {
+    let lastWidth = 0, lastHeight = 0;
+    const resize = (): void => {
       const width = container.clientWidth; const height = container.clientHeight;
-      if (!width || !height) return;
+      if (!width || !height || (width === lastWidth && height === lastHeight)) return;
+      lastWidth = width; lastHeight = height;
       this.renderer.setSize(width, height); this.rig.camera.aspect = width / height; this.rig.camera.updateProjectionMatrix();
-    }); this.observer.observe(container);
+      this.rig.fit((this.opts.layers - 1) * this.gap);
+    };
+    this.observer = new ResizeObserver(resize); this.observer.observe(container);
     const canvas = this.renderer.domElement;
     const hit = (e: PointerEvent): ReturnType<typeof pickSquare> => pickSquare(e, canvas, this.rig.camera, this.pieces.children, this.highlights.children, this.boards, this.focus);
     canvas.addEventListener('pointerdown', e => {
@@ -71,7 +75,9 @@ export class BoardView {
     const loop = (): void => {
       if (this.disposed) return;
       this.rig.controls.update(); this.renderer.render(this.scene, this.rig.camera); this.frame = requestAnimationFrame(loop);
-    }; loop();
+    };
+    // UIがコンテナをDOMへ追加した後、最初のフレームも正しいサイズで必ず描く。
+    this.frame = requestAnimationFrame(() => { resize(); loop(); });
   }
   setPieces(pieces: RenderPiece[]): void {
     this.data = pieces.map(p => ({ sq: { ...p.sq }, piece: { ...p.piece } }));

@@ -1,7 +1,7 @@
 import type { Game } from '../core/game';
 import { isInCheck } from '../core/rules';
 import { colorName, el } from './dom';
-export function banner(game: Game): HTMLElement {
+export function banner(game: Game, selected = false): HTMLElement {
   const node = el('div', 'status-banner'); node.setAttribute('role', 'status'); node.setAttribute('aria-live', 'polite');
   if (game.phase.kind === 'ended') {
     const result = game.phase.result; node.classList.add('ended');
@@ -12,7 +12,9 @@ export function banner(game: Game): HTMLElement {
     }
   } else if (game.position) {
     const check = isInCheck(game.position, game.position.sideToMove); node.classList.toggle('in-check', check);
-    node.textContent = `${colorName(game.position.sideToMove)}の手番${check ? ' — 王手。玉を守る手を選んでください' : ' — 駒を選んでください'}`;
+    const instruction = selected ? '移動先を選んでください（もう一度押すと取り消し）'
+      : check ? '玉を守る手を選んでください' : '駒を選んでください';
+    node.textContent = `${colorName(game.position.sideToMove)}の手番 — ${check ? '王手。' : ''}${instruction}`;
   }
   return node;
 }

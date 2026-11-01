@@ -6,6 +6,9 @@ import type { Move } from '../src/core/types';
 import { emptyPosition, put, sq } from './helpers';
 
 describe('局面と初期配置', () => {
+  it.each([0, -1, 1, 2, 4, 8, 10, 3.5, NaN, Infinity])('非対応の層数 %s を拒否する', layers => {
+    expect(() => new Position({ files: 9, ranks: 9, layers })).toThrow('盤の設定が不正です');
+  });
   it('添字は0始まりで、層を含む', () => {
     expect(Position.index(sq(1, 1, 0))).toBe(0);
     expect(Position.index(sq(9, 9, 2))).toBe(242);
