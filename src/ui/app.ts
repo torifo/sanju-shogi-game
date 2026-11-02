@@ -1,22 +1,18 @@
 import { SANJU } from '../core/config';
 import { Game } from '../core/game';
-import { kanjiNumber, layerName, layerNames } from '../core/notation';
+import { kanjiNumber, layerNames } from '../core/notation';
 import { isInCheck } from '../core/rules';
 import type { HandKind, Move, Square } from '../core/types';
 import type { BoardView } from '../render/scene';
-import type { CameraPreset } from '../render/camera';
 import { sameSquare, squareKey, type Highlights, type RenderPiece } from '../render/types';
-import { banner } from './banner';
 import { button, colorName, el, heading } from './dom';
 import { handoff } from './handoff';
-import { hands } from './hands';
-import { moveLog } from './log';
 import { Minimap } from './minimap';
 import { Placement } from './placement';
-import { chooseDialog, promotion } from './promotion';
 import { clearSavedGame, persistGame, readSavedGame } from './storage';
+import type { OnlineUI } from './online';
 
-type Screen = 'title' | 'handoff' | 'placement' | 'reveal' | 'game';
+type Screen = 'title' | 'online' | 'handoff' | 'placement' | 'reveal' | 'game';
 type Selection = { kind: 'board'; sq: Square } | { kind: 'hand'; piece: HandKind };
 
 export class App {
@@ -35,20 +31,29 @@ export class App {
   private epoch = 0;
   private savedWarning = '';
   private fallback = false;
+  private online?: OnlineUI;
+  private boardPanels?: typeof import('./boardPanels');
+  private actionEvents = new AbortController();
 
   constructor(private readonly root: HTMLElement) {
     window.addEventListener('keydown', e => {
-      if (this.screen !== 'placement' || !this.draft || e.ctrlKey || e.metaKey || e.altKey || /INPUT|SELECT|TEXTAREA/.test((e.target as HTMLElement)?.tagName)) return;
+      if (this.screen !== 'placement' || !this.draft || (this.online && !this.online.canPlace()) || e.ctrlKey || e.metaKey || e.altKey || /INPUT|SELECT|TEXTAREA/.test((e.target as HTMLElement)?.tagName)) return;
       if (/^[1-9]$/.test(e.key)) {
         const z = Number(e.key) - 1;
         if (z < this.game.config.layers) { e.preventDefault(); this.draft.setLayer(z); this.update(); }
       }
     }, { signal: this.events.signal });
-    this.title();
+    this.title(false);
+    if (location.hash.startsWith('#room=')) void this.startOnline(location.hash);
+    window.addEventListener('hashchange', () => {
+      if (location.hash.startsWith('#room=')) void this.startOnline(location.hash);
+      else if (this.online || this.screen === 'online') this.title();
+    }, { signal: this.events.signal });
   }
 
   private resetScreen(screen: Screen): void {
     this.epoch++; this.screenEvents.abort(); this.screenEvents = new AbortController();
+    this.actionEvents.abort(); this.actionEvents = new AbortController();
     this.view?.dispose(); this.view = undefined; this.minimap = undefined; this.panels = undefined;
     this.selection = undefined; this.busy = false; this.screen = screen; this.root.replaceChildren();
   }
@@ -67,9 +72,12 @@ export class App {
     });
   }
   private save(): void {
+    if (this.online) return;
     if (!persistGame(this.game)) this.savedWarning = '保存できませんでした。対局は続けられますが、この画面を閉じると続きから再開できません。';
   }
-  private title(): void {
+  private title(clearInvite = true): void {
+    this.online?.dispose(); this.online = undefined;
+    if (clearInvite && location.hash.startsWith('#room=')) history.replaceState(null, '', location.pathname + location.search);
     this.resetScreen('title'); this.unsubscribe?.(); this.unsubscribe = undefined; this.draft = undefined;
     const saved = readSavedGame();
     const hero = el('main', 'title-screen'); const intro = el('section', 'title-intro');
@@ -79,7 +87,7 @@ export class App {
     const resume = button('続きから', () => {
       if (!saved.game) return;
       this.attachGame(saved.game); this.mountBoard('game'); this.legal = this.game.legalMoves(); this.update();
-    }); resume.disabled = !saved.game; actions.append(resume);
+    }); resume.disabled = !saved.game; actions.append(resume, button('オンライン対戦', () => { void this.startOnline(); }));
     intro.append(actions, el('p', 'muted', '1台で、ふたり。秘密の配置を同時に公開して始めます。'));
     if (saved.message) intro.append(el('p', 'notice', saved.message));
     const illustration = el('div', 'title-illustration'); illustration.setAttribute('aria-hidden', 'true');
@@ -91,7 +99,44 @@ export class App {
       ['二', '同時に公開', '互いの配置を見せずに確定。三層へ一斉に展開。'],
       ['三', '立体を読む', '平面の動きに上下の一層。展開図でも指せます。'],
     ]) { const item = el('article'); item.append(el('span', 'guide-number', n), el('h2', '', title), el('p', '', text)); guide.append(item); }
-    this.root.append(this.header(), hero, guide, el('footer', '', '三重将棋 · ローカル2人対戦 / 持ち時間なし'));
+    this.root.append(this.header(), hero, guide, el('footer', '', '三重将棋 · ローカル / オンライン2人対戦 · 持ち時間なし'));
+  }
+  private async startOnline(hash = ''): Promise<void> {
+    this.online?.dispose(); this.online = undefined;
+    this.unsubscribe?.(); this.unsubscribe = undefined; this.draft = undefined; this.savedWarning = '';
+    this.game = new Game(SANJU);
+    this.resetScreen('online'); this.root.append(this.header(), el('p', 'status-banner', 'オンライン対戦を準備しています'));
+    const epoch = this.epoch;
+    try {
+      const { OnlineUI } = await import('./online');
+      if (epoch !== this.epoch) return;
+      this.online = new OnlineUI({ show: content => {
+        this.resetScreen('online'); this.root.append(this.header(), content);
+      }, changed: () => this.syncOnline() });
+      this.online.open(hash);
+    } catch {
+      if (epoch === this.epoch) this.root.append(el('p', 'notice', 'オンライン対戦を読み込めませんでした。ページを再読み込みしてください。'));
+    }
+  }
+  private syncOnline(): void {
+    const online = this.online, session = online?.session;
+    if (!online || !session || !session.myColor) return;
+    // Reconnection may replace Game. Never retain a subscription to an older Game.
+    this.game = session.game; this.selection = undefined;
+    this.actionEvents.abort(); this.actionEvents = new AbortController(); this.busy = false;
+    if (this.game.phase.kind === 'placing') {
+      if (this.screen !== 'placement') {
+        this.draft = new Placement(this.game.config, session.myColor);
+        if (online.assignment) this.draft.assignment = [...online.assignment];
+        void this.mountBoard('placement');
+      }
+    } else if (!online.publicSeen) {
+      online.publicSeen = true; this.draft = undefined; void this.reveal();
+    } else if (this.screen !== 'game' && this.screen !== 'reveal') {
+      this.draft = undefined; void this.mountBoard('game');
+    }
+    this.legal = this.game.legalMoves(); this.update();
+    if (session.pendingUndo?.direction === 'incoming' && session.status === 'playing') void online.promptUndo(this.actionEvents.signal);
   }
   private newGame(): void {
     this.savedWarning = clearSavedGame() ? '' : '保存領域を利用できません。配置は保存せず、この画面内で対局できます。';
@@ -119,7 +164,7 @@ export class App {
     const loading = el('p', '', '盤を準備しています'); loading.setAttribute('role', 'status'); stage.append(loading);
     const makeMinimap = (): void => {
       this.minimap?.element.remove();
-      this.minimap = new Minimap(this.game.config.layers, sq => { void this.pick(sq); }, screen === 'placement' ? (sq, delta) => { this.draft?.drag(sq, delta); this.update(); } : undefined, this.fallback);
+      this.minimap = new Minimap(this.game.config.layers, sq => { void this.pick(sq); }, screen === 'placement' ? (sq, delta) => { if (this.online && !this.online.canPlace()) return; this.draft?.drag(sq, delta); this.update(); } : undefined, this.fallback);
       center.append(this.minimap.element);
     };
     const fallback = (): void => {
@@ -131,34 +176,21 @@ export class App {
     center.append(stage, toolbar); makeMinimap(); layout.append(left, center, right); main.append(top, status, layout, controls, message);
     this.panels = { status, controls, left, right, message }; this.root.append(this.header(), main);
     try {
+      this.boardPanels ??= await import('./boardPanels');
+      if (epoch !== this.epoch) return;
       const { BoardView, isWebGLAvailable } = await import('../render/scene');
       if (epoch !== this.epoch) return;
       if (!isWebGLAvailable()) { fallback(); makeMinimap(); this.update(); return; }
       stage.replaceChildren(el('span', 'stage-caption', '三重将棋 / 3D BOARD'));
       this.view = new BoardView(stage, { layers: this.game.config.layers, layerGap: 2.2 });
       this.view.onPick(({ sq }) => { void this.pick(sq); });
-      if (screen === 'placement') this.view.onLayerDrag((sq, delta) => { this.draft?.drag(sq, delta); this.update(); });
-      this.buildViewToolbar(toolbar); toolbar.hidden = false;
+      if (screen === 'placement') this.view.onLayerDrag((sq, delta) => { if (this.online && !this.online.canPlace()) return; this.draft?.drag(sq, delta); this.update(); });
+      this.boardPanels.buildViewToolbar(toolbar, this.game.config.layers, () => this.view); toolbar.hidden = false;
       this.update();
     } catch {
       if (epoch !== this.epoch) return;
       fallback(); makeMinimap(); this.update();
     }
-  }
-  private buildViewToolbar(toolbar: HTMLElement): void {
-    const camera = el('div', 'toolbar-group'); camera.append(el('span', '', '視点'));
-    for (const [preset, label] of [['oblique', '斜め'], ['top', '真上'], ['side', '横']] as const) {
-      const b = button(label, () => {
-        this.view?.setCameraPreset(preset as CameraPreset);
-        camera.querySelectorAll('button').forEach(item => item.setAttribute('aria-pressed', String(item === b)));
-      }); b.setAttribute('aria-pressed', String(preset === 'oblique')); camera.append(b);
-    }
-    const focus = el('label', 'toolbar-group'); focus.append(el('span', '', '注目'));
-    const select = el('select'); select.setAttribute('aria-label', '注目する層'); select.append(new Option('全層', 'all'));
-    for (let z = 0; z < this.game.config.layers; z++) select.append(new Option(layerName(z, this.game.config.layers), String(z)));
-    select.addEventListener('change', () => this.view?.setFocusLayer(select.value === 'all' ? null : Number(select.value))); focus.append(select);
-    const gap = button('間隔を広げる', () => { const wide = gap.getAttribute('aria-pressed') !== 'true'; gap.setAttribute('aria-pressed', String(wide)); gap.textContent = wide ? '間隔を戻す' : '間隔を広げる'; this.view?.setLayerGap(wide ? 3.5 : 2.2); }); gap.setAttribute('aria-pressed', 'false');
-    toolbar.append(camera, focus, gap);
   }
   private pieces(): RenderPiece[] {
     if (this.screen === 'placement') return this.draft?.pieces() ?? [];
@@ -180,9 +212,12 @@ export class App {
     if (!this.panels) return;
     const pieces = this.pieces(); const highlights = this.highlights();
     this.view?.setPieces(pieces); this.view?.setHighlights(highlights);
-    this.minimap?.update(pieces, highlights, this.screen !== 'reveal' && !this.busy);
+    const online = this.online, session = online?.session;
+    const editable = !online || (this.screen === 'placement' ? online.canPlace() : online.canPlay());
+    this.minimap?.update(pieces, highlights, this.screen !== 'reveal' && !this.busy && editable);
     const { status, controls, left, right, message } = this.panels;
-    message.textContent = this.savedWarning;
+    message.textContent = session?.error || online?.notice || this.savedWarning;
+    message.setAttribute('role', 'status');
     if (this.screen === 'placement' && this.draft) {
       status.replaceChildren(el('p', 'status-banner', `${colorName(this.draft.color)}のみ表示中 — 相手の配置は非公開です`));
       controls.replaceChildren(this.draft.controls(() => this.update(), () => this.submitPlacement()));
@@ -191,20 +226,27 @@ export class App {
     } else if (this.screen === 'reveal') {
       status.replaceChildren(el('p', 'status-banner', '両者の配置を公開しています…'));
       left.replaceChildren(el('h2', '', '先手')); right.replaceChildren(el('h2', '', '後手')); controls.replaceChildren();
-    } else if (this.screen === 'game') {
+    } else if (this.screen === 'game' && this.boardPanels) {
+      const { banner, hands, moveLog } = this.boardPanels;
       status.replaceChildren(banner(this.game, this.selection !== undefined));
       const selectedHand = this.selection?.kind === 'hand' ? this.selection.piece : undefined;
       left.replaceChildren(hands(this.game, 'sente', selectedHand, p => this.selectHand(p)));
       right.replaceChildren(hands(this.game, 'gote', selectedHand, p => this.selectHand(p)), moveLog(this.game.notation));
-      const row = el('div', 'game-controls button-row');
-      const undo = button('待った（一手戻す）', () => this.act(() => this.game.undo())); undo.disabled = this.busy || this.game.moves.length === 0;
-      const resign = button('投了', () => { void this.resign(); }, 'danger'); resign.disabled = this.busy || this.game.phase.kind !== 'playing';
-      row.append(undo, resign, el('span', 'muted', this.game.phase.kind === 'ended' ? '対局終了。タイトルから新しい対局を始められます。' : '黄：選択 / 緑：合法手 / 青：直前の手 / 赤：王手'));
-      controls.replaceChildren(row);
+      controls.replaceChildren(this.boardPanels.gameControls(this.game, this.busy, online,
+        () => this.act(() => online ? online.session!.requestUndo() : this.game.undo()), () => { void this.resign(); }));
     }
+    online?.decorateBoard(this.screen, this.panels, this.busy);
   }
   private submitPlacement(): void {
     if (this.screen !== 'placement' || !this.draft || this.busy) return;
+    if (this.online) {
+      if (!this.online.canPlace()) return;
+      const online = this.online; this.busy = true;
+      void online.submit(this.draft.assignment).catch(error => { if (this.online === online) this.error(error); }).finally(() => {
+        if (this.online === online) { this.busy = false; this.update(); }
+      });
+      this.update(); return;
+    }
     const draft = this.draft; this.busy = true;
     // Remove all secret draft data from renderers before changing the active player.
     this.resetScreen(draft.color === 'sente' ? 'handoff' : 'reveal');
@@ -229,35 +271,38 @@ export class App {
   }
   private async pick(sq: Square): Promise<void> {
     if (this.busy) return;
+    if (this.online && !(this.screen === 'placement' ? this.online.canPlace() : this.online.canPlay())) return;
     if (this.screen === 'placement') { this.draft?.select(sq); this.update(); return; }
-    if (this.screen !== 'game' || this.game.phase.kind !== 'playing') return;
+    if (this.screen !== 'game' || this.game.phase.kind !== 'playing' || !this.boardPanels) return;
     const candidates = this.selectedMoves().filter(m => sameSquare(m.to, sq));
     if (candidates.length) {
       this.busy = true; this.update(); const epoch = this.epoch;
       let move = candidates[0]!;
       if (candidates.some(m => m.kind === 'move' && m.promote) && candidates.some(m => m.kind === 'move' && !m.promote)) {
-        const choice = await promotion(this.screenEvents.signal);
-        if (this.epoch !== epoch) return;
+        const signal = this.actionEvents.signal;
+        const choice = await this.boardPanels!.promotion(signal);
+        if (this.epoch !== epoch || signal.aborted) return;
         if (choice === null) { this.busy = false; this.update(); return; }
         move = candidates.find(m => m.kind === 'move' && m.promote === (choice === 0))!;
       }
-      this.busy = false; this.act(() => this.game.play(move)); return;
+      this.busy = false; this.act(() => this.online ? this.online.session!.play(move) : this.game.play(move)); return;
     }
     const piece = this.game.position?.get(sq);
     this.selection = piece?.color === this.game.position?.sideToMove && piece ? this.selection?.kind === 'board' && sameSquare(this.selection.sq, sq) ? undefined : { kind: 'board', sq: { ...sq } } : undefined;
     this.update();
   }
   private selectHand(piece: HandKind): void {
-    if (this.busy || this.game.phase.kind !== 'playing') return;
+    if (this.busy || this.game.phase.kind !== 'playing' || this.online && !this.online.canPlay()) return;
     this.selection = this.selection?.kind === 'hand' && this.selection.piece === piece ? undefined : { kind: 'hand', piece }; this.update();
   }
   private async resign(): Promise<void> {
-    if (this.busy || this.game.phase.kind !== 'playing' || !this.game.position) return;
+    if (this.busy || this.game.phase.kind !== 'playing' || !this.game.position || this.online && this.online.session?.status !== 'playing') return;
     this.busy = true; this.update(); const epoch = this.epoch;
-    const choice = await chooseDialog('投了しますか', `${colorName(this.game.position.sideToMove)}が投了すると対局が終了します。`, ['投了する'], this.screenEvents.signal);
-    if (this.epoch !== epoch) return;
+    const signal = this.actionEvents.signal;
+    const choice = await this.boardPanels!.chooseDialog('投了しますか', `${colorName(this.online?.session?.myColor ?? this.game.position.sideToMove)}が投了すると対局が終了します。`, ['投了する'], signal);
+    if (this.epoch !== epoch || signal.aborted) return;
     this.busy = false;
-    if (choice === 0) this.act(() => this.game.resign(this.game.position!.sideToMove)); else this.update();
+    if (choice === 0) this.act(() => this.online ? this.online.session!.resign() : this.game.resign(this.game.position!.sideToMove)); else this.update();
   }
   private act(action: () => void): void {
     if (this.busy) return;
@@ -267,6 +312,7 @@ export class App {
     if (this.panels) { this.panels.message.textContent = error instanceof Error ? error.message : '操作できませんでした。もう一度お試しください。'; this.panels.message.setAttribute('role', 'alert'); }
   }
   dispose(): void {
+    this.online?.dispose(); this.online = undefined;
     this.resetScreen('title'); this.unsubscribe?.(); this.unsubscribe = undefined; this.events.abort();
     this.draft = undefined; this.legal = []; this.game = new Game(SANJU);
   }

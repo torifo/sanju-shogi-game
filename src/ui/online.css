@@ -1,0 +1,8 @@
+/* Online rooms follow the same paper, wood and dark green palette as local play. */
+.online-screen { width: min(680px, calc(100% - 2rem)); margin: clamp(2rem, 7vh, 5rem) auto; padding: clamp(1.25rem, 5vw, 3rem); }
+.online-screen > * + * { margin-top: 1.5rem; }
+.online-screen .status-banner { margin-bottom: 0; }
+.online-color { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; }
+.online-color select { min-height: 44px; padding: .6rem 1rem; background: var(--panel); border: 1px solid var(--line); border-radius: 3px; }
+.invite-label { display: grid; gap: .5rem; font-size: .85rem; }
+.invite-link { width: 100%; min-width: 0; min-height: 48px; padding: .75rem; color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: 3px; font: .85rem monospace; }
