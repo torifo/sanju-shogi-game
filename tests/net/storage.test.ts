@@ -2,14 +2,16 @@ import { describe, expect, it, vi } from 'vitest';
 import { SANJU } from '../../src/core/config';
 import { defaultAssignment } from '../../src/core/setup';
 import { createMemoryPair, createMemoryRoom } from '../../src/net/memoryTransport';
-import type { NetMessage } from '../../src/net/protocol';
+import { commitHash, type NetMessage } from '../../src/net/protocol';
 import { OnlineSession } from '../../src/net/session';
-import { clearRoom, loadRoom, saveRoom, type RoomStorage, type SavedRoom, type StorageLike } from '../../src/net/storage';
+import { clearRoom, hasLegacyPublicRoom, loadRoom, saveRoom, type RoomStorage, type SavedRoom, type StorageLike } from '../../src/net/storage';
 
 const key = 'AAAAAAAAAAAAAAAAAAAAAA';
+const publicProofs = { sente: { salt: 'AAAAAAAAAAAAAAAAAAAAAA', hash: '8bf74bdd58e9012f58c94137573112160a64ec370cef13712f2b1fa3d8877a83' },
+  gote: { salt: 'AAAAAAAAAAAAAAAAAAAAAA', hash: '8bf74bdd58e9012f58c94137573112160a64ec370cef13712f2b1fa3d8877a83' } };
 const assignment = defaultAssignment(SANJU);
-const empty: SavedRoom = { v: 1, role: 'host', myColor: null,
-  sync: { layers: 3, placements: null, moves: [] },
+const empty: SavedRoom = { v: 2, role: 'host', myColor: null,
+  sync: { layers: 3, reveals: null, undo: null, placements: null, moves: [] },
   setup: { assignment: null, salt: null, hash: null, peerHash: null } };
 function store() {
   const data = new Map<string, string>();
@@ -75,12 +77,25 @@ describe('部屋の保存', () => {
     expect(() => saveRoom(key, empty, broken)).not.toThrow();
     expect(loadRoom(key, broken)).toBeNull(); expect(() => clearRoom(key, broken)).not.toThrow();
     const { raw, data } = store();
-    for (const value of ['{bad', 'null', JSON.stringify({ ...empty, v: 2 }), JSON.stringify({ ...empty, role: 'bad' }),
+    for (const value of ['{bad', 'null', JSON.stringify({ ...empty, v: 99 }), JSON.stringify({ ...empty, role: 'bad' }),
       JSON.stringify({ ...empty, myColor: 'other' }), JSON.stringify({ ...empty, sync: { ...empty.sync, layers: 4 } }),
       JSON.stringify({ ...empty, setup: { ...empty.setup, hash: 'bad' } }),
       JSON.stringify({ ...empty, setup: { ...empty.setup, assignment, salt: null } }),
-      JSON.stringify({ ...empty, sync: { layers: 3, placements: { sente: assignment, gote: assignment }, moves: ['m:7,7,1>7,4,1'] } }),
+      JSON.stringify({ ...empty, sync: { layers: 3, reveals: publicProofs, undo: null, placements: { sente: assignment, gote: assignment }, moves: ['m:7,7,1>7,4,1'] } }),
     ]) { data.set(`sanju-shogi:online:${key}`, value); expect(loadRoom(key, raw)).toBeNull(); }
+  });
+  it('v1の未公開配置は移行し、証拠のない公開済み保存は変更せず拒否する', () => {
+    const { raw, data } = store();
+    const oldPrivate = { ...empty, v: 1, sync: { layers: 3, placements: null, moves: [] } };
+    data.set(`sanju-shogi:online:${key}:host`, JSON.stringify(oldPrivate));
+    expect(loadRoom(key, raw, 'host')).toEqual(empty);
+    const oldPublic = JSON.stringify({ ...oldPrivate, myColor: 'sente',
+      sync: { layers: 3, placements: { sente: assignment, gote: assignment }, moves: [] } });
+    data.set(`sanju-shogi:online:${key}:host`, oldPublic);
+    expect(loadRoom(key, raw, 'host')).toBeNull();
+    expect(hasLegacyPublicRoom(key, 'host', raw)).toBe(true);
+    expect(hasLegacyPublicRoom(key, 'guest', raw)).toBe(false);
+    expect(data.get(`sanju-shogi:online:${key}:host`)).toBe(oldPublic);
   });
   it('localStorage未提供でもセッションを進められる', async () => {
     const pair = createMemoryPair();
@@ -112,7 +127,7 @@ describe('切断と再開', () => {
     expect(host.role).toBe('host'); expect(host.myColor).toBe('sente');
     expect(f.a.adapter.load(key)?.setup?.salt).toBe(saved.setup?.salt);
     const hello = send.mock.calls.map(([msg]) => msg).find(m => m.type === 'hello');
-    expect(hello).toEqual({ type: 'hello', protocol: 1, role: 'host', layers: 3, resume: { layers: 3, placements: null, moves: [] } });
+    expect(hello).toEqual({ type: 'hello', protocol: 2, role: 'host', layers: 3, resume: { layers: 3, reveals: null, undo: null, placements: null, moves: [] } });
     await f.guest.submitPlacement(assignment);
     await vi.waitFor(() => expect([host.status, f.guest.status]).toEqual(['playing', 'playing']));
     expect(f.a.adapter.load(key)?.setup).toBeUndefined(); expect(f.b.adapter.load(key)?.setup).toBeUndefined();
@@ -167,7 +182,7 @@ describe('切断と再開', () => {
   });
   it('不正なsyncの棋譜を採用しない', async () => {
     const f = await fixture(); await start(f);
-    f.pair[1].send({ type: 'sync', state: { layers: 3, placements: { sente: assignment, gote: assignment }, moves: ['m:7,7,1>7,4,1'] } });
+    f.pair[1].send({ type: 'sync', state: { layers: 3, reveals: publicProofs, undo: null, placements: { sente: assignment, gote: assignment }, moves: ['m:7,7,1>7,4,1'] } });
     await vi.waitFor(() => expect(f.host.status).toBe('error'));
     expect(f.host.game.moves).toHaveLength(0); f.host.dispose(); f.guest.dispose();
   });
@@ -206,6 +221,116 @@ describe('切断と再開', () => {
     expect(send.mock.calls.some(([m]) => m.type === 'hello' && m.resume?.moves.length === 1)).toBe(true);
     host.game.undo(); expect(host.game.moves).toHaveLength(0);
     host.dispose(); guest.dispose();
+  });
+  it.each(['sync', 'reload-hello'] as const)('R1: %sでもcommit後の配置差し替えを拒否する', async path => {
+    const f = await fixture();
+    const original = f.pair[1].send.bind(f.pair[1]);
+    vi.spyOn(f.pair[1], 'send').mockImplementation(msg => { if (msg.type !== 'reveal') original(msg); });
+    await Promise.all([f.host.submitPlacement(assignment), f.guest.submitPlacement(assignment)]);
+    await vi.waitFor(() => expect(f.guest.status).toBe('playing'));
+    expect(f.host.game.phase.kind).toBe('placing');
+    const state = f.b.adapter.load(key)!.sync;
+    state.placements!.gote = Array<number>(20).fill(2);
+    // Even a self-consistent replacement proof must match the previously pinned commit.
+    state.reveals!.gote.hash = await commitHash(state.placements!.gote, state.reveals!.gote.salt);
+    let host = f.host;
+    if (path === 'sync') original({ type: 'sync', state });
+    else {
+      host.dispose(); await tick();
+      vi.mocked(f.pair[1].send).mockImplementation(msg => original(msg.type === 'hello' ? { ...msg, resume: state } : msg));
+      host = new OnlineSession({ role: 'host', roomKey: key, config: SANJU, transport: f.room.connect(), storage: f.a.adapter });
+    }
+    await vi.waitFor(() => expect([host.status, f.guest.status]).toEqual(['error', 'error']));
+    expect(host.game.position).toBeNull(); host.dispose(); f.guest.dispose();
+  });
+  it.each(['salt', 'missing', 'null'] as const)('R1: syncの証拠不正（%s）を拒否する', async variant => {
+    const f = await fixture();
+    const original = f.pair[1].send.bind(f.pair[1]);
+    vi.spyOn(f.pair[1], 'send').mockImplementation(msg => { if (msg.type !== 'reveal') original(msg); });
+    await Promise.all([f.host.submitPlacement(assignment), f.guest.submitPlacement(assignment)]);
+    await vi.waitFor(() => expect(f.guest.status).toBe('playing'));
+    const state = f.b.adapter.load(key)!.sync;
+    if (variant === 'salt') state.reveals!.gote.salt = key;
+    else if (variant === 'null') state.reveals = null;
+    else Reflect.deleteProperty(state, 'reveals');
+    original({ type: 'sync', state });
+    await vi.waitFor(() => expect(f.host.status).toBe('error'));
+    expect(f.host.game.position).toBeNull(); f.host.dispose(); f.guest.dispose();
+  });
+  it.each([false, true])('R2: 承認通知が消えても取り消しと別の初手を保存・同期する（再読み込み=%s）', async reload => {
+    const f = await fixture(); await start(f);
+    f.host.play(f.host.game.legalMoves()[0]!);
+    await vi.waitFor(() => expect(f.guest.game.moves).toHaveLength(1));
+    f.guest.requestUndo(); await vi.waitFor(() => expect(f.host.pendingUndo?.direction).toBe('incoming'));
+    const original = f.pair[0].send.bind(f.pair[0]); let reply!: NetMessage;
+    vi.spyOn(f.pair[0], 'send').mockImplementation(msg => {
+      if (msg.type === 'undo-reply') reply = msg; else if (msg.type !== 'move') original(msg);
+    });
+    f.host.replyUndo(true);
+    expect(f.a.adapter.load(key)!.sync.undo?.epoch).toBe(1);
+    expect(f.b.adapter.load(key)!.pendingUndo?.direction).toBe('outgoing');
+    f.host.play(f.host.game.legalMoves()[1]!); // A different first move in the new generation.
+    let host = f.host, guest = f.guest, pair = f.pair;
+    if (reload) {
+      host.dispose(); guest.dispose(); pair = createMemoryPair();
+      host = new OnlineSession({ role: 'host', roomKey: key, config: SANJU, transport: pair[0], storage: f.a.adapter });
+      guest = new OnlineSession({ role: 'guest', roomKey: key, config: SANJU, transport: pair[1], storage: f.b.adapter });
+    } else { pair[0].disconnect(); await tick(); pair[0].reconnect(); }
+    await vi.waitFor(() => expect([host.status, guest.status]).toEqual(['playing', 'playing']));
+    await vi.waitFor(() => expect(guest.game.moves).toEqual(host.game.moves));
+    expect(host.game.moves).toHaveLength(1); expect(guest.pendingUndo).toBeUndefined();
+    pair[0].send(reply); await tick(); // A late delivery must not undo the replacement move.
+    expect(guest.game.moves).toHaveLength(1);
+    guest.requestUndo(); await vi.waitFor(() => expect(host.pendingUndo?.epoch).toBe(2)); host.replyUndo(true);
+    // In the original fixture the send spy still drops replies; reconnect recovers that too.
+    if (!reload) { pair[0].disconnect(); await tick(); pair[0].reconnect(); }
+    await vi.waitFor(() => expect(guest.game.moves).toHaveLength(0));
+    expect(f.a.adapter.load(key)!.sync.undo?.epoch).toBe(2);
+    expect(f.b.adapter.load(key)!.sync.undo?.epoch).toBe(2);
+    expect(guest.game.position).toEqual(host.game.position); host.dispose(); guest.dispose();
+  });
+  it('R2: 承認通知が消えた0手の棋譜を長い旧棋譜で上書きしない', async () => {
+    const f = await fixture(); await start(f);
+    f.host.play(f.host.game.legalMoves()[0]!); await vi.waitFor(() => expect(f.guest.game.moves).toHaveLength(1));
+    f.guest.requestUndo(); await vi.waitFor(() => expect(f.host.pendingUndo).toBeDefined());
+    const original = f.pair[0].send.bind(f.pair[0]);
+    vi.spyOn(f.pair[0], 'send').mockImplementation(msg => { if (msg.type !== 'undo-reply') original(msg); });
+    f.host.replyUndo(true); f.pair[0].disconnect(); await tick(); f.pair[0].reconnect();
+    await vi.waitFor(() => expect([f.host.status, f.guest.status]).toEqual(['playing', 'playing']));
+    await vi.waitFor(() => expect(f.guest.game.moves).toHaveLength(0));
+    expect(f.host.game.moves).toHaveLength(0); expect(f.guest.game.position).toEqual(f.host.game.position);
+    // Old-epoch moves cannot resurrect the removed move at the same ply.
+    original({ type: 'move', epoch: 0, ply: 1, move: 'm:7,7,1>7,6,1' }); await tick();
+    expect(f.guest.game.moves).toHaveLength(0); f.host.dispose(); f.guest.dispose();
+  });
+  it.each([0, 1].flatMap(ply => [false, true].map(dropped => ({ ply, dropped }))))('R4: 指し手と投了の行き違い（投了ply=$ply、配送失敗=$dropped）', async ({ ply, dropped }) => {
+    const f = await fixture(); await start(f);
+    if (ply === 1) {
+      f.host.play(f.host.game.legalMoves()[0]!); await vi.waitFor(() => expect(f.guest.game.moves).toHaveLength(1));
+    }
+    const mover = ply === 0 ? f.host : f.guest, resigner = ply === 0 ? f.guest : f.host;
+    const endpoint = f.pair[ply === 0 ? 1 : 0], original = endpoint.send.bind(endpoint);
+    if (dropped) vi.spyOn(endpoint, 'send').mockImplementation(msg => { if (msg.type !== 'resign') original(msg); });
+    mover.play(mover.game.legalMoves()[0]!); resigner.resign();
+    if (dropped) { await tick(); f.pair[0].disconnect(); await tick(); f.pair[0].reconnect(); }
+    await vi.waitFor(() => expect([f.host.status, f.guest.status]).toEqual(['ended', 'ended']));
+    expect(f.host.game.moves).toHaveLength(ply); expect(f.guest.game.moves).toHaveLength(ply);
+    expect(f.host.game.phase).toEqual(f.guest.game.phase);
+    expect(f.host.game.position).toEqual(f.guest.game.position);
+    expect(f.a.adapter.load(key)!.sync).toEqual(f.b.adapter.load(key)!.sync);
+    f.host.dispose(); f.guest.dispose();
+  });
+  it.each(['sente', 'gote', 'random'] as const)('R6: 相手参加前の再読み込みでも作成時の色を維持する（%s）', async choice => {
+    const room = createMemoryRoom(), storage = store();
+    const rng = vi.spyOn(crypto, 'getRandomValues').mockImplementation(array => { (array as Uint8Array).fill(1); return array; });
+    const first = new OnlineSession({ role: 'host', hostColorChoice: choice, roomKey: key, config: SANJU, transport: room.connect(), storage: storage.adapter });
+    const color = first.myColor; expect(storage.adapter.load(key)!.myColor).toBe(color); first.dispose(); await tick();
+    rng.mockImplementation(array => { (array as Uint8Array).fill(0); return array; });
+    const host = new OnlineSession({ role: 'host', roomKey: key, config: SANJU, transport: room.connect(), storage: storage.adapter });
+    const guest = new OnlineSession({ role: 'guest', roomKey: key, config: SANJU, transport: room.connect(), storage: null });
+    await vi.waitFor(() => expect([host.status, guest.status]).toEqual(['placing', 'placing']));
+    expect(host.myColor).toBe(color); expect(guest.myColor).not.toBe(color);
+    host.dispose(); guest.dispose(); rng.mockRestore();
   });
   it('外部storageアダプタが例外を出しても対局を続行する', async () => {
     const pair = createMemoryPair();

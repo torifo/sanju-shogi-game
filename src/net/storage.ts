@@ -1,6 +1,9 @@
 import { validateAssignment } from '../core/setup';
 import type { Color } from '../core/types';
-import { gameFromSync, hasKeys, isColor, isHash, isRecord, isSyncState, isToken, type Role, type SyncState } from './protocol';
+import {
+  gameFromSync, hasKeys, isColor, isHash, isRecord, isSyncState, isToken, isPendingUndo,
+  type PendingUndo, type Role, type SyncState,
+} from './protocol';
 
 export interface SetupState {
   assignment: number[] | null;
@@ -9,12 +12,13 @@ export interface SetupState {
   peerHash: string | null;
 }
 export interface SavedRoom {
-  v: 1;
+  v: 2;
   role: Role;
   myColor: Color | null;
   sync: SyncState;
-  /** Omitted after reveal; salts and private placements are no longer needed. */
+  /** Public reveal evidence remains in sync after setup is omitted. */
   setup?: SetupState;
+  pendingUndo?: PendingUndo;
 }
 export interface StorageLike {
   getItem(key: string): string | null;
@@ -29,9 +33,9 @@ export interface RoomStorage {
 const prefix = 'sanju-shogi:online:';
 
 export function isSavedRoom(raw: unknown): raw is SavedRoom {
-  if (!isRecord(raw) || !hasKeys(raw, ['v', 'role', 'myColor', 'sync'], ['setup']) || raw.v !== 1
+  if (!isRecord(raw) || !hasKeys(raw, ['v', 'role', 'myColor', 'sync'], ['setup', 'pendingUndo']) || raw.v !== 2
     || (raw.role !== 'host' && raw.role !== 'guest') || (raw.myColor !== null && !isColor(raw.myColor))
-    || !isSyncState(raw.sync)) return false;
+    || !isSyncState(raw.sync) || (Object.hasOwn(raw, 'pendingUndo') && !isPendingUndo(raw.pendingUndo))) return false;
   if (raw.sync.placements) {
     if (!isColor(raw.myColor) || Object.hasOwn(raw, 'setup')) return false;
   } else {
@@ -57,7 +61,12 @@ export function loadRoom(key: string, storage?: StorageLike, role?: Role): Saved
     const read = (name: string): SavedRoom | null => {
       try {
         const text = target?.getItem(name);
-        const raw: unknown = text ? JSON.parse(text) : null;
+        let raw: unknown = text ? JSON.parse(text) : null;
+        // A private v1 setup still contains all pinned commits and can be upgraded safely.
+        // Public v1 saves discarded salts, so never manufacture evidence for them.
+        if (isRecord(raw) && raw.v === 1 && isRecord(raw.sync) && raw.sync.placements === null) {
+          raw = { ...raw, v: 2, sync: { ...raw.sync, reveals: null, undo: null } };
+        }
         return isSavedRoom(raw) ? raw : null;
       } catch { return null; }
     };
@@ -86,3 +95,19 @@ export function clearRoom(key: string, storage?: StorageLike): void {
 export const localRoomStorage: RoomStorage = {
   load: (key, role) => loadRoom(key, undefined, role), save: saveRoom, clear: clearRoom,
 };
+
+/** Keep unverifiable v1 games intact and tell the UI to refuse a fresh session over them. */
+export function hasLegacyPublicRoom(key: string, role?: Role, storage?: StorageLike): boolean {
+  try {
+    const target = storage ?? globalThis.localStorage;
+    return ['', ...(role ? [':' + role] : [':host', ':guest'])].some(suffix => {
+      const text = target?.getItem(prefix + key + suffix);
+      if (!text) return false;
+      try {
+        const raw: unknown = JSON.parse(text);
+        return isRecord(raw) && raw.v === 1 && (!role || raw.role === role)
+          && isRecord(raw.sync) && isRecord(raw.sync.placements);
+      } catch { return false; }
+    });
+  } catch { return false; }
+}

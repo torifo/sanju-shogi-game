@@ -33,7 +33,7 @@ describe('偽Transport', () => {
     const received = vi.fn(); const joined = vi.fn(); const left = vi.fn();
     b.onMessage(received); b.onPeerJoin(joined); b.onPeerLeave(left);
     await tick();
-    const msg: NetMessage = { type: 'move', ply: 1, move: 'm:7,7,1>7,6,1' };
+    const msg: NetMessage = { type: 'move', epoch: 0, ply: 1, move: 'm:7,7,1>7,6,1' };
     a.send(msg); msg.ply = 42;
     expect(received).not.toHaveBeenCalled();
     await tick(); expect(received).toHaveBeenCalledWith({ ...msg, ply: 1 });
@@ -49,9 +49,9 @@ describe('偽Transport', () => {
     const receivedA = vi.fn(); const receivedB = vi.fn(); const receivedC = vi.fn();
     a.onMessage(receivedA); b.onMessage(receivedB); c.onMessage(receivedC);
     await tick(); expect(receivedC).toHaveBeenCalledWith({ type: 'full' });
-    c.send({ type: 'resign', color: 'sente' }); await tick();
+    c.send({ type: 'resign', epoch: 0, ply: 0, color: 'sente' }); await tick();
     expect(receivedA).not.toHaveBeenCalled(); expect(receivedB).not.toHaveBeenCalled();
-    a.send({ type: 'hello', protocol: 1, role: 'host', layers: 3 }); await tick();
+    a.send({ type: 'hello', protocol: 2, role: 'host', layers: 3 }); await tick();
     expect(receivedB).toHaveBeenCalledTimes(1); expect(receivedC).toHaveBeenCalledTimes(1);
     a.leave(); b.leave(); c.leave();
   });
@@ -142,22 +142,22 @@ describe('OnlineSession', () => {
   });
   it('受信した不正な手をcoreで検証して中断する', async () => {
     const { host, guest, pair } = await started();
-    pair[0].send({ type: 'move', ply: 1, move: 'm:7,7,1>7,4,1' });
+    pair[0].send({ type: 'move', epoch: 0, ply: 1, move: 'm:7,7,1>7,4,1' });
     await vi.waitFor(() => expect([host.status, guest.status]).toEqual(['error', 'error']));
     expect(guest.game.moves).toHaveLength(0); host.dispose(); guest.dispose();
   });
   it('相手の番ではない手も中断する', async () => {
     const { host, guest, pair } = await started();
-    pair[1].send({ type: 'move', ply: 1, move: encodeMove(host.game.legalMoves()[0]!) });
+    pair[1].send({ type: 'move', epoch: 0, ply: 1, move: encodeMove(host.game.legalMoves()[0]!) });
     await vi.waitFor(() => expect(host.status).toBe('error')); host.dispose(); guest.dispose();
   });
   it('重複plyを捨て、飛んだplyはsync交換で回復する', async () => {
     const { host, guest, pair } = await started();
     const sent = vi.spyOn(pair[1], 'send');
     await oneMove(host, guest);
-    pair[0].send({ type: 'move', ply: 1, move: encodeMove(host.game.moves[0]!) });
+    pair[0].send({ type: 'move', epoch: 0, ply: 1, move: encodeMove(host.game.moves[0]!) });
     await tick(); expect(guest.game.moves).toHaveLength(1);
-    pair[0].send({ type: 'move', ply: 3, move: encodeMove(host.game.moves[0]!) });
+    pair[0].send({ type: 'move', epoch: 0, ply: 3, move: encodeMove(host.game.moves[0]!) });
     await tick();
     expect(sent.mock.calls.some(([m]) => m.type === 'sync')).toBe(true);
     expect(guest.status).toBe('playing'); expect(guest.game.moves).toHaveLength(1);
@@ -167,7 +167,7 @@ describe('OnlineSession', () => {
     const { host, guest } = await started();
     await oneMove(host, guest);
     host.requestUndo();
-    await vi.waitFor(() => expect(guest.pendingUndo).toEqual({ ply: 1, direction: 'incoming' }));
+    await vi.waitFor(() => expect(guest.pendingUndo).toEqual(expect.objectContaining({ ply: 1, direction: 'incoming' })));
     expect(host.game.moves).toHaveLength(1);
     guest.replyUndo(accepted);
     await vi.waitFor(() => expect(host.pendingUndo).toBeUndefined());
@@ -180,10 +180,23 @@ describe('OnlineSession', () => {
     host.requestUndo(); guest.requestUndo();
     await vi.waitFor(() => expect(guest.pendingUndo?.direction).toBe('incoming'));
     expect(host.pendingUndo?.direction).toBe('outgoing');
+    const { direction: _, ...operation } = guest.pendingUndo!;
     guest.replyUndo(true);
     await vi.waitFor(() => expect(host.game.moves).toHaveLength(0));
-    pair[1].send({ type: 'undo-reply', ply: 1, accepted: true }); await tick();
+    pair[1].send({ type: 'undo-reply', ...operation, accepted: true }); await tick();
     expect(host.game.moves).toHaveLength(0); expect(host.status).toBe('playing');
+    expect(host.game.position).toEqual(guest.game.position); host.dispose(); guest.dispose();
+  });
+  it('R2: 拒否された操作の古い承認を同じply・世代の新しい申し入れに適用しない', async () => {
+    const { host, guest, pair } = await started(); await oneMove(host, guest);
+    host.requestUndo(); await vi.waitFor(() => expect(guest.pendingUndo?.direction).toBe('incoming'));
+    const { direction: _, ...old } = guest.pendingUndo!;
+    guest.replyUndo(false); await vi.waitFor(() => expect(host.pendingUndo).toBeUndefined());
+    host.requestUndo(); await vi.waitFor(() => expect(guest.pendingUndo?.id).toBe(host.pendingUndo?.id));
+    expect(host.pendingUndo!.id).not.toBe(old.id);
+    pair[1].send({ type: 'undo-reply', ...old, accepted: true }); await tick();
+    expect(host.game.moves).toHaveLength(1); expect(host.pendingUndo).toBeDefined();
+    guest.replyUndo(true); await vi.waitFor(() => expect(host.game.moves).toHaveLength(0));
     expect(host.game.position).toEqual(guest.game.position); host.dispose(); guest.dispose();
   });
   it('3人目のセッションは満員の文言で停止する', async () => {
@@ -195,8 +208,8 @@ describe('OnlineSession', () => {
   it('形の違う入力と未要求のundo-replyを捨てる', async () => {
     const { host, guest, pair } = await started();
     await oneMove(host, guest);
-    pair[1].send({ type: 'undo-reply', ply: 1, accepted: true });
-    pair[1].send({ type: 'move', ply: '1' } as unknown as NetMessage);
+    pair[1].send({ type: 'undo-reply', epoch: 1, id: 'AAAAAAAAAAAAAAAAAAAAAA', requester: 'host', ply: 1, accepted: true });
+    pair[1].send({ type: 'move', epoch: 0, ply: '1' } as unknown as NetMessage);
     pair[1].send({ type: 'full', extra: true } as unknown as NetMessage);
     await tick(); expect(host.game.moves).toHaveLength(1); expect(host.status).toBe('playing');
     host.dispose(); guest.dispose();
@@ -204,7 +217,7 @@ describe('OnlineSession', () => {
   it('protocol不一致は専用文言で停止する', async () => {
     const pair = createMemoryPair();
     const host = new OnlineSession({ role: 'host', transport: pair[0], config: SANJU, roomKey: key, storage: null });
-    pair[1].onPeerJoin(() => pair[1].send({ type: 'hello', protocol: 2, role: 'guest', layers: 3 }));
+    pair[1].onPeerJoin(() => pair[1].send({ type: 'hello', protocol: 1, role: 'guest', layers: 3, resume: { layers: 3, placements: null, moves: [] } } as unknown as NetMessage));
     await vi.waitFor(() => expect(host.status).toBe('error'));
     expect(host.error).toBe('相手のアプリのバージョンが違います。ページを再読み込みしてください');
     host.dispose(); pair[1].leave();
@@ -223,9 +236,9 @@ describe('OnlineSession', () => {
       onPeerLeave: fn => { leave = fn; }, leave: vi.fn(),
     };
     const host = new OnlineSession({ role: 'host', transport, config: SANJU, roomKey: key, storage: null });
-    join(); receive({ type: 'hello', protocol: 1, role: 'guest', layers: 3 }); leave();
+    join(); receive({ type: 'hello', protocol: 2, role: 'guest', layers: 3 }); leave();
     await tick(); expect(host.status).toBe('disconnected'); expect(host.error).toBeUndefined();
-    join(); receive({ type: 'hello', protocol: 1, role: 'guest', layers: 3 });
+    join(); receive({ type: 'hello', protocol: 2, role: 'guest', layers: 3 });
     await vi.waitFor(() => expect(host.status).toBe('placing')); host.dispose();
   });
 });

@@ -52,33 +52,58 @@ https://torifo.github.io/sanju-shogi-game/#room=<roomKey>
 
 ## 4. メッセージ
 
-すべて 1 つのアクション `msg` で送り、`type` で分ける。受け取ったメッセージは形を検証してから使う（形が違えば捨てる）。
+すべて1つのアクション `msg` で送り、`type` で分ける。通信は **protocol 2**。通常の形違いは捨てるが、公開済み状態を含む `sync` / `hello.resume` の証拠欠落・不正は `error` で中断する。旧protocolのhelloは再開データを採用せず、バージョン違いを表示する。
 
 | type | 中身 | 送る側・時機 |
 |---|---|---|
-| `hello` | `protocol: 1`, `role: 'host' \| 'guest'`, `layers`, `resume?: SyncState` | 接続直後に両者 |
-| `assign` | `hostColor: Color` | host が hello を受けた後（ランダムなら host の端末で決める） |
+| `hello` | `protocol: 2`, `role: 'host' \| 'guest'`, `layers`, `resume?: SyncState` | 接続直後に両者 |
+| `assign` | `hostColor: Color` | hostがhelloを受けた後。色は部屋作成時に決定・保存済み |
 | `commit` | `hash`（SHA-256 hex） | 自分の配置を確定したとき |
-| `reveal` | `assignment: number[]`, `salt` | 両者の commit がそろった後 |
-| `move` | `ply`, `move`（`encodeMove` の文字列） | 自分の手を指したとき |
-| `undo-request` / `undo-reply` | `ply` / `ply, accepted` | 待ったの申し入れと返事 |
-| `resign` | `color` | 投了 |
-| `sync` | `SyncState` | 再接続時（下記） |
-| `full` | なし | 3 人目に返す |
+| `reveal` | `assignment: number[]`, `salt` | 両者のcommitがそろった後 |
+| `move` | `epoch`, `ply`, `move`（`encodeMove`の文字列） | 自分の手を指したとき |
+| `undo-request` | `epoch`, `id`, `ply`, `requester: Role` | 待ったの申し入れ |
+| `undo-reply` | 同じ操作の`epoch`, `id`, `ply`, `requester`, `accepted` | 待ったの返事 |
+| `resign` | `color`, `epoch`, `ply` | 投了した時点の世代・手数 |
+| `sync` | `state: SyncState` | 再接続・手数や世代の欠落を検出したとき |
+| `full` | なし | 3人目に返す |
 | `error` | `reason` | 食い違いなどで対局を止めるとき |
 
-- `hash = SHA-256(JSON.stringify({ assignment, salt }))`。`salt` は 128 bit の乱数。
-- reveal を受けたら、ハッシュが一致するか、`validateAssignment` を通るかを確かめる。どちらかが駄目なら `error` を送って止める。
-- `move` は `ply`（何手目か）で順番と重複を判定する。自分の局面の手数 + 1 と一致しないものは、再送なら捨て、飛んでいれば `sync` を求める。
-- 相手の手番のあいだは、自分の盤は操作できない。
+`SyncState`は以下を持つ。
+
+- `layers`, `placements: { sente: number[], gote: number[] } | null`, `moves: string[]`, `result?`。
+- `reveals: { sente: { salt, hash }, gote: { salt, hash } } | null`。公開後は両者の配置に対応するsaltと確定ハッシュを残す。配置中は`placements`と`reveals`がnull、棋譜は空、結果はなし。
+- `undo: { epoch, id, ply, requester } | null`。最後に承認・適用済みの待った。nullは世代0を表す。全履歴を列挙せず、単調増加する世代と最後の操作を保存する。
+
+### 配置の照合
+
+- `hash = SHA-256(JSON.stringify({ assignment, salt }))`。saltと操作IDは128bitの暗号学的乱数。
+- 通常のrevealは、現在の層数で`validateAssignment`を通し、受信済みcommitとハッシュを照合する。
+- `sync` / `hello.resume`でも、公開データの両者の配置とsaltからハッシュを再計算する。配置中から公開済みへ移る場合、自分の配置・ハッシュの一致に加え、相手の証拠を**既に受信・保存した相手commit**に照合する。自己申告の新しいハッシュだけでは置き換えない。
+- 公開後の同期も保存した両者のcommitに固定する。証拠がない・照合が失敗する場合はerrorで止める。
+
+### 待った・指し手・投了
+
+- 待ったは現在の世代+1と新しいIDで申し込む。承認側は一手戻し、承認済み操作と棋譜を**通知前に保存**する。要求側は一致するID・世代・ply・requesterの返事だけを一度適用する。同時申し入れはhost側を残す。
+- 通知が届かなくても、新しい世代のsyncが承認済みの待ったとその後の棋譜を伝える。古い世代のmove・resignと、適用済み／別IDの返事は捨てる。未来の世代の指し手は直接採用せずsyncを交換する。
+- 同じ世代のmoveはplyで重複と欠落を判定する。重複は捨て、手数が飛んでいればsyncを交換する。相手番・待った回答待ちのUIでは指せない。
+- 投了は「その世代のそのplyの局面で投了した」とする。受信側は棋譜をそのplyまで戻して終局し、投了済み側はその後に届く指し手を捨てる。再接続でも、同じ世代で先頭部分が一致する長い棋譜より、短い投了済み棋譜を優先する。結果と最終棋譜を一致させる。
+
+### 入力上限
+
+- 棋譜は最大2000手。`moves.length`を走査・配列複製・棋譜再生より先に検査する。配置は各20要素、手の文字列は64文字、reasonは256文字、salt／IDは22文字、hashは64文字。enumは既知の値だけを認め、余分なキーは拒否する。
+- Trystero 0.26のインストール済み`BaseRoomConfig.maxReceiveBytes?: number`を確認し、総受信サイズ／受信予算を256 KiBに制限する。2000手の最大メッセージが収まる値とする。2000手に達した場合は追加の着手を拒否し、待った・投了は可能。
 
 ## 5. 切断と再開
 
-- 対局の状態は役割ごとに `localStorage` の `sanju-shogi:online:<roomKey>:host` / `:guest` に保存する。中身は、役割、自分の色、層数、自分の配置と salt（配置中のみ）、公開後の両者の配置、棋譜、結果。旧形式 `sanju-shogi:online:<roomKey>` は記録された役割のキーへ移行し、新形式の保存があればそちらを優先する。
-- Web Locks が使える環境では、タブが `sanju-shogi:<roomKey>:<role>` を排他的に保持する。作成時は host を確保する。リンクを開いたときは host の保存があれば host を試し、別タブが保持していれば guest を試す。host の保存がなければ guest のみを試す。いずれも `ifAvailable: true` とし、空きがなければ別タブで開いている旨を表示する。退出・ページ退避・接続準備の失敗時に解放する。Web Locks がない環境では保存済みの役割を復元する従来の動作とする。
-- 相手との接続が切れたら「相手との接続が切れました。相手がリンクを開き直すと再開します」と表示して待つ。
-- 再接続したら、互いに `SyncState`（両者の配置、棋譜、結果）を送り合う。一方の棋譜がもう一方の先頭部分と一致していれば、長いほうに合わせる（`core` で合法か確かめながら）。一致しなければ「対局の記録が食い違っています」と表示して止める。
-- 配置中に切れた場合は、確定済みのハッシュと自分の配置を保存しておき、再接続後にその続きから進める。
+- 保存形式は`v: 2`。役割ごとの`localStorage`キー`sanju-shogi:online:<roomKey>:host` / `:guest`を使う。役割、自分の色、SyncState、配置中の自分の配置・salt・hash・peerHash、未決着の待った（操作とincoming/outgoing）を保存する。公開後も両者のsaltと確定ハッシュをSyncStateに保持する。
+- **部屋作成ボタンを押した時点**で先手・後手を決定して保存する。ランダムもこの時点で一度決め、Transportの準備中や相手待機中の再読み込みでも変えない。
+- タブの役割は`sessionStorage`の`sanju-shogi:tab-role:<roomKey>`に保存し、再読み込み・BFCache復帰では最優先する。役割が記録されていればその役割だけをロック・復元し、相手役へのフォールバックはしない。自分の配置として取り込むのは選択した役割の保存だけ。
+- タブ内の役割がない初回入室では、hostの保存があればhostを試し、別タブが保持していればguestを試す。それ以外はguestのみ。作成時はhostのみ。Web Locksは`sanju-shogi:<roomKey>:<role>`を`ifAvailable: true`で排他的に取得し、取得不能なら別タブで開いている旨を表示する。退出・ページ退避・接続準備の失敗時に解放する。Web Locks非対応では排他を保証できない。sessionStorage禁止ではタブの役割維持を保証できない。
+- **同じブラウザの2タブはlocalStorageを共有し、秘密配置の保護境界にはならない。** これは自分で試す用途向け。相手に配置を隠して遊ぶ場合は別ブラウザ・別プロファイル・別端末を使う。
+- 切断後は盤を残して再接続を待つ。再接続時に互いのSyncStateをcoreで合法性を検査し、まず待ったの世代で新旧を決める。世代が新しければ棋譜が短くても、取り消し後に別の手へ分岐していても新しい側を採用する。同じ世代で操作IDなどが異なれば不一致。同じ世代・操作で棋譜が先頭一致なら長い側を採用するが、先に投了した短い棋譜は優先する。先頭不一致・矛盾した結果はerrorで止める。
+- 未決着の待ったは保存し、再接続時に同じ操作IDで再送する。承認済み世代を採用したら待機を解除する。再送された承認を二重適用しない。
+- 配置中の再開は保存した自分の配置・salt・両者のcommitから続行する。片側だけ公開を受信した場合でも、その側のSyncStateの証拠を照合して回復する。
+- 旧保存キー`sanju-shogi:online:<roomKey>`は記録された役割へ移行し、新しい役割別保存を優先する。v1の未公開保存はcommitの証拠を保持しているためv2へ移行できる。v1の公開済み保存はsaltが欠落しているため安全な再開はできず、案内して止め、旧データは上書きしない。protocol 1との通信互換性は持たせない。
 
 ## 6. エラー表示
 
@@ -141,6 +166,6 @@ export interface Transport {
 - 20秒経過時、参加側で peer がなければ部屋未発見の案内を出す。`getRelaySockets()` の WebSocket が一つも OPEN でなければ、作成者にも仲介サーバー未接続の案内を出す。WebSocket が OPEN でもリレーの仲介受理までは保証できず、その場合は部屋未発見の案内となる。案内後も待機を続け、遅れて接続した場合に進む。接続済みの P2P はリレーの切断だけでは止めない。
 - UI は `OnlineSession` の通知ごとに `session.game` を読み直す。配置中の描画は自分の Placement のみで、相手の commit は文字だけで通知する。確定後・相手番・待ったへの回答待ち・切断中・エラー中は該当する盤の操作を止める。
 - 起動時とハッシュ変更時に招待リンクを読む。保存済みの role / 層数を復元し、公開済みの対局は再公開演出をせず表示する。BFCache の退避時は描画と接続を破棄し、復帰時は URL に残る同じ部屋へ再接続する。「タイトルへ」は部屋のハッシュを消して退出するが、再開用の保存は残す。
-- 未確定の配置案は保存しない。確定済みの自分の配置と salt は段階1の部屋保存で再開する。保存禁止環境では再開を保証できない。ローカル対戦の保存キーにはオンラインの状態を書かない。
+- 未確定の配置案は保存しない。確定済みの自分の配置とsaltは部屋保存で再開し、公開後は両者の証拠として保持する。保存禁止環境では再開を保証できない。ローカル対戦の保存キーにはオンラインの状態を書かない。
 - オンライン UI / CSS と Trystero は動的 import。初期 JS を増やさないため、共通の対局パネル・視点ツールバー・選択ダイアログも盤の画面で遅延読み込みする。
 - Transport のモックと jsdom + MemoryTransport で画面・操作・再開・後始末を検証。実 Nostr リレー経由での2タブ対戦と再読み込みは別途ブラウザ確認が必要。

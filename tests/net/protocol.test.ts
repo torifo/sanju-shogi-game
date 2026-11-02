@@ -1,18 +1,20 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { commitHash, mergeSync, parseMessage, randomSalt, type NetMessage, type SyncState } from '../../src/net/protocol';
 import { buildInviteUrl, createRoomKey, readRoomKey, roomNameFor } from '../../src/net/roomKey';
 
+const publicProofs = { sente: { salt: 'AAAAAAAAAAAAAAAAAAAAAA', hash: '8bf74bdd58e9012f58c94137573112160a64ec370cef13712f2b1fa3d8877a83' },
+  gote: { salt: 'AAAAAAAAAAAAAAAAAAAAAA', hash: '8bf74bdd58e9012f58c94137573112160a64ec370cef13712f2b1fa3d8877a83' } };
 const assignment = Array<number>(20).fill(1);
 const salt = 'AAAAAAAAAAAAAAAAAAAAAA';
-const sync: SyncState = { layers: 3, placements: { sente: assignment, gote: assignment }, moves: [] };
+const sync: SyncState = { layers: 3, reveals: publicProofs, undo: null, placements: { sente: assignment, gote: assignment }, moves: [] };
 const move = 'm:7,7,1>7,6,1';
 const messages: NetMessage[] = [
-  { type: 'hello', protocol: 1, role: 'host', layers: 3 },
-  { type: 'hello', protocol: 1, role: 'guest', layers: 9, resume: { layers: 9, placements: null, moves: [] } },
+  { type: 'hello', protocol: 2, role: 'host', layers: 3 },
+  { type: 'hello', protocol: 2, role: 'guest', layers: 9, resume: { layers: 9, reveals: null, undo: null, placements: null, moves: [] } },
   { type: 'assign', hostColor: 'gote' }, { type: 'commit', hash: 'a'.repeat(64) },
-  { type: 'reveal', assignment, salt }, { type: 'move', ply: 1, move },
-  { type: 'undo-request', ply: 0 }, { type: 'undo-reply', ply: 2, accepted: false },
-  { type: 'resign', color: 'sente' }, { type: 'sync', state: sync },
+  { type: 'reveal', assignment, salt }, { type: 'move', epoch: 0, ply: 1, move },
+  { type: 'undo-request', epoch: 1, id: salt, requester: 'host', ply: 1 }, { type: 'undo-reply', epoch: 1, id: 'AAAAAAAAAAAAAAAAAAAAAA', requester: 'host', ply: 2, accepted: false },
+  { type: 'resign', epoch: 0, ply: 0, color: 'sente' }, { type: 'sync', state: sync },
   { type: 'full' }, { type: 'error', reason: '記録が不一致' },
 ];
 
@@ -28,20 +30,42 @@ describe('メッセージの境界検証', () => {
   });
   it.each([null, [], 1, 'hello', {}, { type: 'unknown' },
     { type: 'hello', protocol: '1', role: 'host', layers: 3 },
-    { type: 'hello', protocol: 1, role: 'other', layers: 3 },
-    { type: 'hello', protocol: 1, role: 'host', layers: 4 },
+    { type: 'hello', protocol: 2, role: 'other', layers: 3 },
+    { type: 'hello', protocol: 2, role: 'host', layers: 4 },
     { type: 'assign', hostColor: 'other' }, { type: 'commit', hash: 'z'.repeat(64) },
     { type: 'commit', hash: 'a'.repeat(63) }, { type: 'commit', hash: 'a'.repeat(64) + '\n' },
     ...[[], Array(19).fill(1), Array(20), Array(20).fill(0.5), Array(20).fill(-1), Array(20).fill(9), Array(20).fill('1')]
       .map(assignment => ({ type: 'reveal', assignment, salt })),
-    { type: 'reveal', assignment, salt: '' }, { type: 'move', ply: 1, move: 'bad' },
+    { type: 'reveal', assignment, salt: '' }, { type: 'move', epoch: 0, ply: 1, move: 'bad' },
     ...[-1, 0, 1.5, Infinity, '1'].map(ply => ({ type: 'move', ply, move })),
-    { type: 'undo-reply', ply: 1, accepted: 'yes' }, { type: 'resign', color: 'other' },
+    { type: 'undo-reply', epoch: 1, id: 'AAAAAAAAAAAAAAAAAAAAAA', requester: 'host', ply: 1, accepted: 'yes' }, { type: 'resign', epoch: 0, ply: 0, color: 'other' },
     { type: 'sync', state: { ...sync, extra: true } },
     { type: 'sync', state: { ...sync, placements: null, moves: [move] } },
     { type: 'sync', state: { ...sync, result: { kind: 'draw', reason: 'bad' } } },
     { type: 'sync', state: { ...sync, placements: { sente: assignment, gote: Array(20).fill(3) } } },
   ])('不正な入力 %j を捨てる', raw => expect(parseMessage(raw)).toBeNull());
+  it('R5: 巨大な棋譜は要素を走査・複製する前に拒否する', () => {
+    const moves = Array<string>(100_000);
+    const access = vi.fn(() => { throw Error('must not read'); });
+    Object.defineProperty(moves, 0, { get: access });
+    const clone = vi.spyOn(globalThis, 'structuredClone');
+    expect(parseMessage({ type: 'sync', state: { ...sync, moves } })).toBeNull();
+    expect(parseMessage({ type: 'hello', protocol: 2, role: 'host', layers: 3, resume: { ...sync, moves } })).toBeNull();
+    expect(access).not.toHaveBeenCalled(); expect(clone).not.toHaveBeenCalled(); clone.mockRestore();
+  });
+  it('R5: 棋譜2000手・reason256文字の境界と各文字列・配列の上限', () => {
+    expect(parseMessage({ type: 'sync', state: { ...sync, moves: Array(2000).fill(move) } })).not.toBeNull();
+    expect(parseMessage({ type: 'sync', state: { ...sync, moves: Array(2001).fill(move) } })).toBeNull();
+    expect(parseMessage({ type: 'error', reason: 'あ'.repeat(256) })).not.toBeNull();
+    for (const size of [257, 1_000_000]) expect(parseMessage({ type: 'error', reason: 'x'.repeat(size) })).toBeNull();
+    for (const raw of [
+      { type: 'commit', hash: 'a'.repeat(1_000_000) },
+      { type: 'reveal', assignment, salt: 'x'.repeat(1_000_000) },
+      { type: 'reveal', assignment: Array(100_000).fill(1), salt },
+      { type: 'move', epoch: 0, ply: 1, move: 'x'.repeat(1_000_000) },
+      { type: 'sync', state: { ...sync, reveals: { ...publicProofs, sente: { ...publicProofs.sente, salt: 'x'.repeat(1000) } } } },
+    ]) expect(parseMessage(raw)).toBeNull();
+  });
   it('バージョン違いをセッションに通知できるよう整数のprotocolを保持する', () => {
     expect(parseMessage({ type: 'hello', protocol: 2, role: 'host', layers: 3 })?.type).toBe('hello');
   });
@@ -90,11 +114,11 @@ describe('SyncStateの突き合わせ', () => {
       expect(mergeSync(sync, remote)).toEqual({ kind: 'conflict' });
     }
   });
-  it('同じ棋譜の投了を採用し、終局後の延長や矛盾する結果を拒否する', () => {
+  it('投了を採用し、行き違った延長より投了を優先して矛盾する結果は拒否する', () => {
     const ended: SyncState = { ...sync, result: { kind: 'win', winner: 'gote', reason: 'resign' } };
     expect(mergeSync(sync, ended)).toEqual({ kind: 'adopt-remote' });
     expect(mergeSync(ended, sync)).toEqual({ kind: 'keep-local' });
-    expect(mergeSync(ended, { ...sync, moves: [move] })).toEqual({ kind: 'conflict' });
+    expect(mergeSync(ended, { ...sync, moves: [move] })).toEqual({ kind: 'keep-local' });
     expect(mergeSync(ended, { ...sync, result: { kind: 'win', winner: 'sente', reason: 'resign' } })).toEqual({ kind: 'conflict' });
   });
 });

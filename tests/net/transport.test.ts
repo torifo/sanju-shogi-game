@@ -20,7 +20,7 @@ describe('Trystero 0.26 adapter', () => {
     const transport = await createTrysteroTransport(key);
     const join = vi.fn(), leave = vi.fn(), receive = vi.fn();
     transport.onPeerJoin(join); transport.onPeerLeave(leave); transport.onMessage(receive);
-    expect(mock.joinRoom).toHaveBeenCalledWith({ appId: 'sanju-shogi-game', password: key }, expect.stringMatching(/^[a-f0-9]{16}$/));
+    expect(mock.joinRoom).toHaveBeenCalledWith({ appId: 'sanju-shogi-game', password: key, maxReceiveBytes: 256 * 1024 }, expect.stringMatching(/^[a-f0-9]{16}$/));
     expect(room.makeAction).toHaveBeenCalledWith('msg');
     room.onPeerJoin!('one'); transport.send({ type: 'commit', hash: 'a'.repeat(64) });
     expect(action.send).toHaveBeenLastCalledWith({ type: 'commit', hash: 'a'.repeat(64) }, { target: 'one' });

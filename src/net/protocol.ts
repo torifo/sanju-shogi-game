@@ -4,7 +4,16 @@ import { validateAssignment } from '../core/setup';
 import { opposite, type Color } from '../core/types';
 
 export type Role = 'host' | 'guest';
+export const PROTOCOL = 2;
+export const MAX_MOVES = 2000;
+export const MAX_TEXT = 256;
+export const MAX_RECEIVE_BYTES = 256 * 1024;
+export interface RevealProof { salt: string; hash: string }
+export interface UndoOperation { epoch: number; id: string; ply: number; requester: Role }
+export interface PendingUndo extends UndoOperation { direction: 'incoming' | 'outgoing' }
 export interface SyncState {
+  reveals: { sente: RevealProof; gote: RevealProof } | null;
+  undo: UndoOperation | null;
   layers: number;
   placements: { sente: number[]; gote: number[] } | null;
   moves: string[];
@@ -15,10 +24,10 @@ export type NetMessage =
   | { type: 'assign'; hostColor: Color }
   | { type: 'commit'; hash: string }
   | { type: 'reveal'; assignment: number[]; salt: string }
-  | { type: 'move'; ply: number; move: string }
-  | { type: 'undo-request'; ply: number }
-  | { type: 'undo-reply'; ply: number; accepted: boolean }
-  | { type: 'resign'; color: Color }
+  | { type: 'move'; epoch: number; ply: number; move: string }
+  | ({ type: 'undo-request' } & UndoOperation)
+  | ({ type: 'undo-reply'; accepted: boolean } & UndoOperation)
+  | { type: 'resign'; color: Color; epoch: number; ply: number }
   | { type: 'sync'; state: SyncState }
   | { type: 'full' }
   | { type: 'error'; reason: string };
@@ -36,15 +45,15 @@ type RecordValue = Record<string, unknown>;
 export const isRecord = (v: unknown): v is RecordValue => typeof v === 'object' && v !== null && !Array.isArray(v);
 export const isColor = (v: unknown): v is Color => v === 'sente' || v === 'gote';
 export const isLayers = (v: unknown): v is number => v === 3 || v === 9;
-export const isToken = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9_-]{22}$/.test(v) && v.length === 22;
-export const isHash = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{64}$/i.test(v) && v.length === 64;
+export const isToken = (v: unknown): v is string => typeof v === 'string' && v.length === 22 && /^[A-Za-z0-9_-]{22}$/.test(v);
+export const isHash = (v: unknown): v is string => typeof v === 'string' && v.length === 64 && /^[a-f0-9]{64}$/i.test(v);
 export const hasKeys = (v: RecordValue, required: string[], optional: string[] = []): boolean =>
   required.every(k => Object.hasOwn(v, k)) && Object.keys(v).every(k => required.includes(k) || optional.includes(k));
 const ply = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
 const assignment = (v: unknown, layers = 9): v is number[] => Array.isArray(v)
-  && validateAssignment({ files: 9, ranks: 9, layers }, v);
+  && v.length === 20 && validateAssignment({ files: 9, ranks: 9, layers }, v);
 const moveText = (v: unknown): v is string => {
-  if (typeof v !== 'string') return false;
+  if (typeof v !== 'string' || v.length > 64) return false;
   try {
     const m = decodeMove(v);
     return m.to.z < 9 && (m.kind === 'drop' || m.from.z < 9);
@@ -55,33 +64,62 @@ const result = (v: unknown): v is Result => isRecord(v) && (v.kind === 'draw'
   : v.kind === 'win' && hasKeys(v, ['kind', 'winner', 'reason']) && isColor(v.winner)
     && ['checkmate', 'no-moves', 'resign', 'perpetual-check'].includes(v.reason as string));
 
+export const isUndoOperation = (v: unknown): v is UndoOperation => isRecord(v)
+  && hasKeys(v, ['epoch', 'id', 'ply', 'requester']) && undoFields(v);
+const undoFields = (v: RecordValue): boolean => ply(v.epoch) && v.epoch > 0 && isToken(v.id)
+  && ply(v.ply) && v.ply > 0 && v.ply <= MAX_MOVES && (v.requester === 'host' || v.requester === 'guest');
+export const isPendingUndo = (v: unknown): v is PendingUndo => isRecord(v)
+  && hasKeys(v, ['epoch', 'id', 'ply', 'requester', 'direction']) && undoFields(v)
+  && (v.direction === 'incoming' || v.direction === 'outgoing');
+const proof = (v: unknown): v is RevealProof => isRecord(v) && hasKeys(v, ['salt', 'hash'])
+  && isToken(v.salt) && isHash(v.hash);
+export const undoEpoch = (state: SyncState): number => state.undo?.epoch ?? 0;
 export function isSyncState(v: unknown): v is SyncState {
-  if (!isRecord(v) || !hasKeys(v, ['layers', 'placements', 'moves'], ['result']) || !isLayers(v.layers)
-    || !Array.isArray(v.moves) || !Array.from(v.moves).every(moveText)
+  if (!isRecord(v) || !hasKeys(v, ['layers', 'placements', 'moves', 'reveals', 'undo'], ['result']) || !isLayers(v.layers)
+    // Check length before iteration or copying (including sparse arrays).
+    || !Array.isArray(v.moves) || v.moves.length > MAX_MOVES || !Array.from(v.moves).every(moveText)
+    || (v.undo !== null && !isUndoOperation(v.undo))
     || (Object.hasOwn(v, 'result') && !result(v.result))) return false;
-  if (v.placements === null) return v.moves.length === 0 && !Object.hasOwn(v, 'result');
+  if (v.placements === null) return v.moves.length === 0 && v.reveals === null && v.undo === null && !Object.hasOwn(v, 'result');
   return isRecord(v.placements) && hasKeys(v.placements, ['sente', 'gote'])
-    && assignment(v.placements.sente, v.layers) && assignment(v.placements.gote, v.layers);
+    && assignment(v.placements.sente, v.layers) && assignment(v.placements.gote, v.layers)
+    && isRecord(v.reveals) && hasKeys(v.reveals, ['sente', 'gote']) && proof(v.reveals.sente) && proof(v.reveals.gote);
+}
+
+/** Every public sync carries checkable evidence; callers also pin it to known commits. */
+export async function verifyReveals(state: SyncState): Promise<boolean> {
+  if (!isSyncState(state)) return false;
+  if (!state.placements || !state.reveals) return state.placements === null;
+  for (const color of ['sente', 'gote'] as const) {
+    if (await commitHash(state.placements[color], state.reveals[color].salt) !== state.reveals[color].hash.toLowerCase()) return false;
+  }
+  return true;
 }
 
 export function parseMessage(raw: unknown): NetMessage | null {
-  if (!isRecord(raw)) return null;
+  if (!isRecord(raw) || typeof raw.type !== 'string' || raw.type.length > MAX_TEXT) return null;
   let valid = false;
   switch (raw.type) {
-    case 'hello': valid = hasKeys(raw, ['type', 'protocol', 'role', 'layers'], ['resume'])
+    case 'hello':
+      if (hasKeys(raw, ['type', 'protocol', 'role', 'layers'], ['resume'])
+        && Number.isSafeInteger(raw.protocol) && (raw.protocol as number) > 0 && raw.protocol !== PROTOCOL
+        && (raw.role === 'host' || raw.role === 'guest') && isLayers(raw.layers)) {
+        return { type: 'hello', protocol: raw.protocol as number, role: raw.role, layers: raw.layers };
+      }
+      valid = hasKeys(raw, ['type', 'protocol', 'role', 'layers'], ['resume'])
       && Number.isSafeInteger(raw.protocol) && (raw.protocol as number) > 0
       && (raw.role === 'host' || raw.role === 'guest') && isLayers(raw.layers)
       && (!Object.hasOwn(raw, 'resume') || (isSyncState(raw.resume) && raw.resume.layers === raw.layers)); break;
     case 'assign': valid = hasKeys(raw, ['type', 'hostColor']) && isColor(raw.hostColor); break;
     case 'commit': valid = hasKeys(raw, ['type', 'hash']) && isHash(raw.hash); break;
     case 'reveal': valid = hasKeys(raw, ['type', 'assignment', 'salt']) && assignment(raw.assignment) && isToken(raw.salt); break;
-    case 'move': valid = hasKeys(raw, ['type', 'ply', 'move']) && ply(raw.ply) && raw.ply > 0 && moveText(raw.move); break;
-    case 'undo-request': valid = hasKeys(raw, ['type', 'ply']) && ply(raw.ply); break;
-    case 'undo-reply': valid = hasKeys(raw, ['type', 'ply', 'accepted']) && ply(raw.ply) && typeof raw.accepted === 'boolean'; break;
-    case 'resign': valid = hasKeys(raw, ['type', 'color']) && isColor(raw.color); break;
+    case 'move': valid = hasKeys(raw, ['type', 'epoch', 'ply', 'move']) && ply(raw.epoch) && ply(raw.ply) && raw.ply > 0 && raw.ply <= MAX_MOVES && moveText(raw.move); break;
+    case 'undo-request': valid = hasKeys(raw, ['type', 'epoch', 'id', 'ply', 'requester']) && undoFields(raw); break;
+    case 'undo-reply': valid = hasKeys(raw, ['type', 'epoch', 'id', 'ply', 'requester', 'accepted']) && undoFields(raw) && typeof raw.accepted === 'boolean'; break;
+    case 'resign': valid = hasKeys(raw, ['type', 'color', 'epoch', 'ply']) && isColor(raw.color) && ply(raw.epoch) && ply(raw.ply) && raw.ply <= MAX_MOVES; break;
     case 'sync': valid = hasKeys(raw, ['type', 'state']) && isSyncState(raw.state); break;
     case 'full': valid = hasKeys(raw, ['type']); break;
-    case 'error': valid = hasKeys(raw, ['type', 'reason']) && typeof raw.reason === 'string' && raw.reason.length > 0; break;
+    case 'error': valid = hasKeys(raw, ['type', 'reason']) && typeof raw.reason === 'string' && raw.reason.length > 0 && raw.reason.length <= MAX_TEXT; break;
   }
   return valid ? structuredClone(raw) as NetMessage : null;
 }
@@ -91,6 +129,9 @@ export async function sha256(text: string): Promise<string> {
   return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
 }
 export const commitHash = (assignment: readonly number[], salt: string): Promise<string> => sha256(JSON.stringify({ assignment, salt }));
+export function chooseHostColor(choice: Color | 'random'): Color {
+  return choice === 'random' ? (crypto.getRandomValues(new Uint8Array(1))[0]! % 2 ? 'sente' : 'gote') : choice;
+}
 export function randomSalt(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -126,11 +167,15 @@ export function mergeSync(local: SyncState, remote: SyncState): SyncMerge {
   }
   if (local.placements.sente.some((z, i) => remote.placements!.sente[i] !== z)
     || local.placements.gote.some((z, i) => remote.placements!.gote[i] !== z)) return { kind: 'conflict' };
+  if (undoEpoch(local) !== undoEpoch(remote)) return { kind: undoEpoch(local) < undoEpoch(remote) ? 'adopt-remote' : 'keep-local' };
+  if (local.undo?.id !== remote.undo?.id || local.undo?.ply !== remote.undo?.ply
+    || local.undo?.requester !== remote.undo?.requester) return { kind: 'conflict' };
   const length = Math.min(local.moves.length, remote.moves.length);
   if (local.moves.slice(0, length).some((move, i) => remote.moves[i] !== move)) return { kind: 'conflict' };
   if (local.moves.length !== remote.moves.length) {
     const shorter = local.moves.length < remote.moves.length ? local : remote;
-    if (shorter.result) return { kind: 'conflict' };
+    if (shorter.result) return { kind: shorter.result.reason === 'resign'
+      ? shorter === local ? 'keep-local' : 'adopt-remote' : 'conflict' };
     return { kind: shorter === local ? 'adopt-remote' : 'keep-local' };
   }
   if (local.result && remote.result) {

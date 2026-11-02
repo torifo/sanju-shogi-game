@@ -19,9 +19,11 @@ let root: HTMLElement, app: App | undefined, room: MemoryRoom, transport: Memory
 let remote: OnlineSession | undefined;
 let options: TransportOptions;
 let locks: MemoryRoleLocks;
+const publicProofs = { sente: { salt: 'AAAAAAAAAAAAAAAAAAAAAA', hash: '8bf74bdd58e9012f58c94137573112160a64ec370cef13712f2b1fa3d8877a83' },
+  gote: { salt: 'AAAAAAAAAAAAAAAAAAAAAA', hash: '8bf74bdd58e9012f58c94137573112160a64ec370cef13712f2b1fa3d8877a83' } };
 const key = 'AAAAAAAAAAAAAAAAAAAAAA';
 beforeEach(() => {
-  localStorage.clear(); history.replaceState(null, '', '/');
+  localStorage.clear(); sessionStorage.clear(); history.replaceState(null, '', '/');
   vi.stubGlobal('crypto', webcrypto);
   vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })));
   locks = new MemoryRoleLocks();
@@ -75,6 +77,10 @@ describe('online screens with memory transport (no real network)', () => {
     const roomKey = location.hash.slice(6);
     await vi.waitFor(() => expect(loadRoom(roomKey, undefined, 'host')).not.toBeNull());
     expect(locks.held.has(`sanju-shogi:${roomKey}:host`)).toBe(true);
+    const hostTabStorage = sessionStorage;
+    const guestData = new Map<string, string>();
+    const guestTabStorage = { getItem: (k: string) => guestData.get(k) ?? null, setItem: (k: string, v: string) => { guestData.set(k, v); } };
+    vi.stubGlobal('sessionStorage', guestTabStorage);
     const guestRoot = document.createElement('div'); document.body.append(guestRoot);
     let guest: App | undefined;
     try {
@@ -99,6 +105,7 @@ describe('online screens with memory transport (no real network)', () => {
       expect(network.create).toHaveBeenLastCalledWith(roomKey, expect.objectContaining({ role: 'guest' }));
       app.dispose();
       await vi.waitFor(() => expect(locks.held.has(`sanju-shogi:${roomKey}:host`)).toBe(false));
+      vi.stubGlobal('sessionStorage', hostTabStorage);
       app = new App(root);
       await vi.waitFor(() => expect(root.textContent).toContain('相手の手番です'));
       expect(network.create).toHaveBeenLastCalledWith(roomKey, expect.objectContaining({ role: 'host' }));
@@ -106,8 +113,59 @@ describe('online screens with memory transport (no real network)', () => {
       expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
     } finally { guest?.dispose(); guestRoot.remove(); }
   });
+  it.each(['reload', 'bfcache'] as const)('R3: hostを閉じた後のguestの%sでも相手の未公開配置を読まない', async mode => {
+    network.create.mockImplementation(async () => {
+      const endpoint = room.connect(); endpoint.disconnect(); setTimeout(() => endpoint.reconnect(), 0); return endpoint;
+    });
+    app = new App(root); click('オンライン対戦');
+    await vi.waitFor(() => expect(root.querySelector('select')).not.toBeNull());
+    root.querySelector('select')!.value = 'sente'; click('部屋を作る');
+    const roomKey = location.hash.slice(6);
+    await vi.waitFor(() => expect(loadRoom(roomKey, undefined, 'host')).not.toBeNull());
+    const guestData = new Map<string, string>();
+    vi.stubGlobal('sessionStorage', { getItem: (k: string) => guestData.get(k) ?? null,
+      setItem: (k: string, v: string) => { guestData.set(k, v); } });
+    const guestRoot = document.createElement('div'); document.body.append(guestRoot);
+    let guest: App | undefined, cleanup: (() => void) | undefined;
+    try {
+      if (mode === 'bfcache') cleanup = (await import('../src/main')).mountApp(guestRoot);
+      else guest = new App(guestRoot);
+      await vi.waitFor(() => expect(guestRoot.textContent).toContain('あなたは後手'));
+      click('配置を確定');
+      await vi.waitFor(() => expect(loadRoom(roomKey, undefined, 'host')?.setup?.hash).not.toBeNull());
+      expect(loadRoom(roomKey, undefined, 'host')?.setup?.assignment).toEqual(defaultAssignment(SANJU));
+      app.dispose(); app = undefined;
+      await vi.waitFor(() => expect(locks.held.has(`sanju-shogi:${roomKey}:host`)).toBe(false));
+      if (mode === 'bfcache') {
+        window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
+        window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+      } else { guest!.dispose(); guest = new App(guestRoot); }
+      await vi.waitFor(() => expect(network.create).toHaveBeenCalledTimes(3));
+      expect(network.create).toHaveBeenLastCalledWith(roomKey, expect.objectContaining({ role: 'guest' }));
+      expect(guestData.get(`sanju-shogi:tab-role:${roomKey}`)).toBe('guest');
+      expect(loadRoom(roomKey, undefined, 'guest')?.setup?.assignment).toBeNull();
+      expect(guestRoot.querySelectorAll('.mini-piece.sente')).toHaveLength(0);
+      expect(locks.held.has(`sanju-shogi:${roomKey}:host`)).toBe(false);
+    } finally { guest?.dispose(); cleanup?.(); guestRoot.remove(); }
+  });
+  it.each([false, true])('R3: guest保存がなくてもタブの役割を優先しhost保存を読まない（guest使用中=%s）', async occupied => {
+    saveRoom(key, { v: 2, role: 'host', myColor: 'sente',
+      sync: { layers: 3, reveals: null, undo: null, placements: null, moves: [] },
+      setup: { assignment: defaultAssignment(SANJU), salt: key, hash: 'a'.repeat(64), peerHash: null } });
+    sessionStorage.setItem(`sanju-shogi:tab-role:${key}`, 'guest');
+    if (occupied) locks.held.add(`sanju-shogi:${key}:guest`);
+    const read = vi.spyOn(Storage.prototype, 'getItem');
+    history.replaceState(null, '', `/#room=${key}`); app = new App(root);
+    if (occupied) {
+      await vi.waitFor(() => expect(root.textContent).toContain('この部屋はこのブラウザの別のタブで開かれています'));
+      expect(network.create).not.toHaveBeenCalled();
+    } else await vi.waitFor(() => expect(network.create).toHaveBeenCalledWith(key, expect.objectContaining({ role: 'guest' })));
+    expect(locks.requested).toEqual([`sanju-shogi:${key}:guest`]);
+    expect(read.mock.calls.some(([name]) => name === `sanju-shogi:online:${key}:host`)).toBe(false);
+    expect(root.querySelectorAll('.mini-piece.sente')).toHaveLength(0);
+  });
   it.each([false, true])('shows an occupied-tab error without joining the network (host save=%s)', async hostSaved => {
-    if (hostSaved) saveRoom(key, { v: 1, role: 'host', myColor: null, sync: { layers: 3, placements: null, moves: [] },
+    if (hostSaved) saveRoom(key, { v: 2, role: 'host', myColor: null, sync: { layers: 3, reveals: null, undo: null, placements: null, moves: [] },
       setup: { assignment: null, salt: null, hash: null, peerHash: null } });
     locks.held.add(`sanju-shogi:${key}:guest`);
     if (hostSaved) locks.held.add(`sanju-shogi:${key}:host`);
@@ -117,8 +175,8 @@ describe('online screens with memory transport (no real network)', () => {
     expect(locks.requested).toEqual(hostSaved ? [`sanju-shogi:${key}:host`, `sanju-shogi:${key}:guest`] : [`sanju-shogi:${key}:guest`]);
   });
   it('reads a legacy host save before acquiring its seat and keeps the saved draft', async () => {
-    localStorage.setItem(`sanju-shogi:online:${key}`, JSON.stringify({ v: 1, role: 'host', myColor: 'gote',
-      sync: { layers: 3, placements: null, moves: [] },
+    localStorage.setItem(`sanju-shogi:online:${key}`, JSON.stringify({ v: 2, role: 'host', myColor: 'gote',
+      sync: { layers: 3, reveals: null, undo: null, placements: null, moves: [] },
       setup: { assignment: Array<number>(20).fill(2), salt: key, hash: 'a'.repeat(64), peerHash: null } }));
     history.replaceState(null, '', `/#room=${key}`); app = new App(root);
     await vi.waitFor(() => expect(root.querySelectorAll('.mini-piece.gote')).toHaveLength(20));
@@ -153,7 +211,7 @@ describe('online screens with memory transport (no real network)', () => {
   });
   it('keeps host resumption working when Web Locks is unavailable', async () => {
     Reflect.deleteProperty(navigator, 'locks');
-    saveRoom(key, { v: 1, role: 'host', myColor: null, sync: { layers: 3, placements: null, moves: [] },
+    saveRoom(key, { v: 2, role: 'host', myColor: null, sync: { layers: 3, reveals: null, undo: null, placements: null, moves: [] },
       setup: { assignment: null, salt: null, hash: null, peerHash: null } });
     history.replaceState(null, '', `/#room=${key}`); app = new App(root);
     await vi.waitFor(() => expect(network.create).toHaveBeenCalledWith(key, expect.objectContaining({ role: 'host' })));
@@ -182,6 +240,33 @@ describe('online screens with memory transport (no real network)', () => {
     click('タイトルへ'); expect(transport.leave).toHaveBeenCalledOnce(); expect(location.hash).toBe('');
     expect(root.querySelector('.title-screen')).not.toBeNull();
     Reflect.deleteProperty(navigator, 'clipboard'); Reflect.deleteProperty(navigator, 'share');
+  });
+  it('証拠のないv1の公開済み保存を上書きせず、再開できない理由を表示する', async () => {
+    const before = JSON.stringify({ v: 1, role: 'host', myColor: 'sente',
+      sync: { layers: 3, placements: { sente: defaultAssignment(SANJU), gote: defaultAssignment(SANJU) }, moves: [] } });
+    localStorage.setItem(`sanju-shogi:online:${key}:host`, before);
+    history.replaceState(null, '', `/#room=${key}`); app = new App(root);
+    await vi.waitFor(() => expect(root.textContent).toContain('旧形式のため安全に再開できません'));
+    expect(network.create).not.toHaveBeenCalled();
+    expect(localStorage.getItem(`sanju-shogi:online:${key}:host`)).toBe(before);
+  });
+  it('R6: Transport準備中の再読み込みでも作成ボタンで選んだ後手を維持する', async () => {
+    let finish!: (endpoint: MemoryTransport) => void;
+    network.create.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    app = new App(root); click('オンライン対戦');
+    await vi.waitFor(() => expect(root.querySelector('select')).not.toBeNull());
+    root.querySelector('select')!.value = 'gote'; click('部屋を作る');
+    const roomKey = location.hash.slice(6);
+    expect(loadRoom(roomKey, undefined, 'host')?.myColor).toBe('gote');
+    await vi.waitFor(() => expect(network.create).toHaveBeenCalledOnce()); app.dispose();
+    app = new App(root);
+    await vi.waitFor(() => expect(network.create).toHaveBeenCalledTimes(2));
+    expect(loadRoom(roomKey, undefined, 'host')?.myColor).toBe('gote');
+    const late = room.connect(), leave = vi.spyOn(late, 'leave'); finish(late);
+    await vi.waitFor(() => expect(leave).toHaveBeenCalledOnce());
+    remote = new OnlineSession({ role: 'guest', transport: room.connect(), config: SANJU, roomKey, storage: null });
+    await vi.waitFor(() => expect(remote!.myColor).toBe('sente'));
+    expect(loadRoom(roomKey, undefined, 'host')?.myColor).toBe('gote');
   });
   it('never renders the opponent during placement, reports commit as text and locks confirmed draft', async () => {
     await host(); expect(root.textContent).not.toContain('端末を');
@@ -245,7 +330,7 @@ describe('online screens with memory transport (no real network)', () => {
     click('タイトルへ'); expect(location.hash).toBe(''); expect(transport.leave).toHaveBeenCalledOnce();
   });
   it('resumes a saved host as host and renders only the saved own committed draft', async () => {
-    saveRoom(key, { v: 1, role: 'host', myColor: 'gote', sync: { layers: 3, placements: null, moves: [] },
+    saveRoom(key, { v: 2, role: 'host', myColor: 'gote', sync: { layers: 3, reveals: null, undo: null, placements: null, moves: [] },
       setup: { assignment: Array<number>(20).fill(2), salt: key, hash: 'a'.repeat(64), peerHash: null } });
     history.replaceState(null, '', `/#room=${key}`); app = new App(root);
     await vi.waitFor(() => expect(network.create).toHaveBeenCalledWith(key, expect.objectContaining({ role: 'host' })));
@@ -254,7 +339,7 @@ describe('online screens with memory transport (no real network)', () => {
   });
   it('resumes public saved state directly and follows a replacement Game after synchronization', async () => {
     const assignment = defaultAssignment(SANJU);
-    saveRoom(key, { v: 1, role: 'host', myColor: 'sente', sync: { layers: 3, placements: { sente: assignment, gote: assignment }, moves: [] } });
+    saveRoom(key, { v: 2, role: 'host', myColor: 'sente', sync: { layers: 3, reveals: publicProofs, undo: null, placements: { sente: assignment, gote: assignment }, moves: [] } });
     history.replaceState(null, '', `/#room=${key}`); app = new App(root);
     await vi.waitFor(() => expect(root.querySelectorAll('.mini-piece')).toHaveLength(40));
     expect(btn('投了').disabled).toBe(true);
@@ -263,7 +348,7 @@ describe('online screens with memory transport (no real network)', () => {
     peerGame.submitPlacement('sente', assignment); peerGame.submitPlacement('gote', assignment);
     const move = peerGame.legalMoves()[0]!;
     const { encodeMove } = await import('../src/core/serialize');
-    const saved = { v: 1 as const, role: 'guest' as const, myColor: 'gote' as const, sync: { layers: 3, placements: { sente: assignment, gote: assignment }, moves: [encodeMove(move)] } };
+    const saved = { v: 2 as const, role: 'guest' as const, myColor: 'gote' as const, sync: { layers: 3, reveals: publicProofs, undo: null, placements: { sente: assignment, gote: assignment }, moves: [encodeMove(move)] } };
     remote = new OnlineSession({ role: 'guest', config: SANJU, roomKey: key, transport: room.connect(), storage: { load: () => saved, save() {}, clear() {} } });
     await vi.waitFor(() => expect(root.querySelectorAll('.notation li')).toHaveLength(1));
     expect(root.textContent).toContain('相手の手番です'); expect(root.textContent).not.toContain('両者の配置を公開しています');
@@ -279,7 +364,7 @@ describe('online screens with memory transport (no real network)', () => {
     await vi.waitFor(() => expect(leave).toHaveBeenCalledOnce()); expect(root.querySelector('.title-screen')).not.toBeNull();
   });
   it('restores the same online host on BFCache return while dropping rendered private pieces', async () => {
-    saveRoom(key, { v: 1, role: 'host', myColor: 'sente', sync: { layers: 3, placements: null, moves: [] },
+    saveRoom(key, { v: 2, role: 'host', myColor: 'sente', sync: { layers: 3, reveals: null, undo: null, placements: null, moves: [] },
       setup: { assignment: defaultAssignment(SANJU), salt: key, hash: 'a'.repeat(64), peerHash: null } });
     history.replaceState(null, '', `/#room=${key}`);
     const { mountApp } = await import('../src/main'); const cleanup = mountApp(root);

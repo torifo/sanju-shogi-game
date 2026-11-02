@@ -1,10 +1,10 @@
 import './online.css';
 import type { Color } from '../core/types';
 import { buildInviteUrl, createRoomKey, readRoomKey } from '../net/roomKey';
-import { parseMessage, type Role, type Transport } from '../net/protocol';
+import { chooseHostColor, parseMessage, type Role, type Transport } from '../net/protocol';
 import { OnlineSession } from '../net/session';
 import { acquireRoleLock, ROOM_OPEN_IN_ANOTHER_TAB, type RoleLockManager, type ReleaseRoleLock } from '../net/roleLock';
-import { loadRoom } from '../net/storage';
+import { loadRoom, saveRoom, hasLegacyPublicRoom, type StorageLike } from '../net/storage';
 import { createTrysteroTransport } from '../net/transport';
 import { button, colorName, el, heading } from './dom';
 import { canPlayOnline, onlineBoardScreen, onlineEntry } from './onlineRouting';
@@ -32,10 +32,24 @@ export class OnlineUI {
   private statusMessage?: HTMLElement;
   private shareMessage?: HTMLElement;
 
-  constructor(private readonly options: OnlineUIOptions) {}
+  private readonly tabStorage?: StorageLike;
+  private rememberedRole?: Role;
+  constructor(private readonly options: OnlineUIOptions) {
+    try { this.tabStorage = globalThis.sessionStorage; } catch { /* Storage may be denied. */ }
+  }
   open(hash: string): void {
-    const key = readRoomKey(hash), saved = key ? loadRoom(key) : null;
-    const entry = onlineEntry(hash, saved ? { role: saved.role, layers: saved.sync.layers } : null);
+    const key = readRoomKey(hash);
+    this.rememberedRole = undefined;
+    try {
+      const role = key ? this.tabStorage?.getItem(`sanju-shogi:tab-role:${key}`) : null;
+      if (role === 'host' || role === 'guest') this.rememberedRole = role;
+    } catch { /* Fall back to role-specific persistent saves. */ }
+    if (key && hasLegacyPublicRoom(key, this.rememberedRole)) {
+      this.showError('保存された対局は旧形式のため安全に再開できません。新しい部屋を作成してください。'); return;
+    }
+    const saved = key ? loadRoom(key, undefined, this.rememberedRole) : null;
+    const entry = onlineEntry(hash, this.rememberedRole ? { role: this.rememberedRole, layers: saved?.sync.layers ?? 3 }
+      : saved ? { role: saved.role, layers: saved.sync.layers } : null);
     if (entry.kind === 'invalid') { this.showError('招待リンクが正しくありません。送られたリンク全体を開いてください。'); return; }
     if (entry.kind === 'room') { void this.connect(entry.roomKey, entry.role, entry.layers); return; }
     this.showCreate();
@@ -54,8 +68,14 @@ export class OnlineUI {
     main.append(label, button('部屋を作る', () => {
       if (this.starting || this.disposed) return;
       const key = createRoomKey();
+      const color = chooseHostColor(select.value as Color | 'random');
+      // Save at the click, before lock acquisition or the network module can yield.
+      saveRoom(key, { v: 2, role: 'host', myColor: color,
+        sync: { layers: 3, placements: null, reveals: null, undo: null, moves: [] },
+        setup: { assignment: null, salt: null, hash: null, peerHash: null } });
+      try { this.tabStorage?.setItem(`sanju-shogi:tab-role:${key}`, 'host'); } catch { /* Best effort. */ }
       history.replaceState(null, '', buildInviteUrl(location.href, key));
-      void this.connect(key, 'host', 3, select.value as Color | 'random');
+      void this.connect(key, 'host', 3, color);
     }, 'primary'));
     this.options.show(main);
   }
@@ -66,7 +86,7 @@ export class OnlineUI {
     let transport: Transport | undefined;
     try {
       // A creator needs the host seat. Invitations may use guest if another tab owns host.
-      const candidates: Role[] = role === 'host' && hostColorChoice === undefined ? ['host', 'guest'] : [role];
+      const candidates: Role[] = !this.rememberedRole && role === 'host' && hostColorChoice === undefined ? ['host', 'guest'] : [role];
       for (const candidate of candidates) {
         const release = await acquireRoleLock(key, candidate, this.options.locks);
         if (this.disposed) { release?.(); return; }
@@ -74,6 +94,7 @@ export class OnlineUI {
       }
       if (!this.releaseRoleLock) { this.showError(ROOM_OPEN_IN_ANOTHER_TAB); return; }
       this.role = role;
+      try { this.tabStorage?.setItem(`sanju-shogi:tab-role:${key}`, role); } catch { /* Best effort. */ }
       const saved = loadRoom(key, undefined, role);
       layers = saved?.sync.layers ?? layers;
       this.submitted = saved?.setup?.assignment != null;
@@ -108,7 +129,7 @@ export class OnlineUI {
   private refresh(): void {
     if (this.disposed) return;
     const session = this.session;
-    if (!session || onlineBoardScreen(session.game.phase.kind, session.myColor) === 'lobby') {
+    if (!session || (session.status === 'waiting' && !this.submitted && !this.publicSeen) || onlineBoardScreen(session.game.phase.kind, session.myColor) === 'lobby') {
       if (session?.error) this.showError(session.error);
       else if (this.statusMessage) this.statusMessage.textContent = this.notice || (session?.status === 'disconnected'
         ? '相手との接続が切れました。相手がリンクを開き直すと再開します'

@@ -1,4 +1,4 @@
-import type { NetMessage, Role, Transport } from './protocol';
+import { MAX_RECEIVE_BYTES, type NetMessage, type Role, type Transport } from './protocol';
 import { roomNameFor } from './roomKey';
 import type { JsonValue } from '@trystero-p2p/nostr';
 export type { Transport } from './protocol';
@@ -12,7 +12,7 @@ export async function createTrysteroTransport(roomKey: string, options: Transpor
   const [{ joinRoom, getRelaySockets }, roomName] = await Promise.all([
     import('@trystero-p2p/nostr'), roomNameFor(roomKey),
   ]);
-  const room = joinRoom({ appId: 'sanju-shogi-game', password: roomKey }, roomName);
+  const room = joinRoom({ appId: 'sanju-shogi-game', password: roomKey, maxReceiveBytes: MAX_RECEIVE_BYTES }, roomName);
   const action = room.makeAction('msg');
   let peer: string | null = null, closed = false, joined = false;
   let messageHandler: ((msg: unknown) => void) | undefined;
