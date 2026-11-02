@@ -3,6 +3,7 @@ import type { Color } from '../core/types';
 import { buildInviteUrl, createRoomKey, readRoomKey } from '../net/roomKey';
 import { parseMessage, type Role, type Transport } from '../net/protocol';
 import { OnlineSession } from '../net/session';
+import { acquireRoleLock, ROOM_OPEN_IN_ANOTHER_TAB, type RoleLockManager, type ReleaseRoleLock } from '../net/roleLock';
 import { loadRoom } from '../net/storage';
 import { createTrysteroTransport } from '../net/transport';
 import { button, colorName, el, heading } from './dom';
@@ -12,6 +13,7 @@ import { chooseDialog } from './promotion';
 interface OnlineUIOptions {
   show: (content: HTMLElement) => void;
   changed: () => void;
+  locks?: RoleLockManager;
 }
 /** Loaded only by the online entry point. Session remains the source of truth. */
 export class OnlineUI {
@@ -26,6 +28,7 @@ export class OnlineUI {
   private disposed = false;
   private unsubscribe?: () => void;
   private starting = false;
+  private releaseRoleLock?: ReleaseRoleLock;
   private statusMessage?: HTMLElement;
   private shareMessage?: HTMLElement;
 
@@ -59,14 +62,25 @@ export class OnlineUI {
   private async connect(key: string, role: Role, layers: number, hostColorChoice?: Color | 'random'): Promise<void> {
     if (this.disposed || this.starting) return;
     this.starting = true; this.roomKey = key; this.role = role;
-    const saved = loadRoom(key);
-    this.submitted = saved?.setup?.assignment != null;
-    this.assignment = saved?.setup?.assignment ? [...saved.setup.assignment] : undefined;
-    this.peerCommitted = saved?.setup?.peerHash != null;
-    this.publicSeen = saved?.sync.placements != null;
     this.showLobby();
     let transport: Transport | undefined;
     try {
+      // A creator needs the host seat. Invitations may use guest if another tab owns host.
+      const candidates: Role[] = role === 'host' && hostColorChoice === undefined ? ['host', 'guest'] : [role];
+      for (const candidate of candidates) {
+        const release = await acquireRoleLock(key, candidate, this.options.locks);
+        if (this.disposed) { release?.(); return; }
+        if (release) { this.releaseRoleLock = release; role = candidate; break; }
+      }
+      if (!this.releaseRoleLock) { this.showError(ROOM_OPEN_IN_ANOTHER_TAB); return; }
+      this.role = role;
+      const saved = loadRoom(key, undefined, role);
+      layers = saved?.sync.layers ?? layers;
+      this.submitted = saved?.setup?.assignment != null;
+      this.assignment = saved?.setup?.assignment ? [...saved.setup.assignment] : undefined;
+      this.peerCommitted = saved?.setup?.peerHash != null;
+      this.publicSeen = saved?.sync.placements != null;
+      this.showLobby();
       transport = await createTrysteroTransport(key, { role, onIssue: message => {
         if (this.disposed) return;
         this.notice = message; this.refresh();
@@ -87,6 +101,7 @@ export class OnlineUI {
       this.refresh();
     } catch {
       transport?.leave();
+      this.releaseRoleLock?.(); this.releaseRoleLock = undefined;
       if (!this.disposed) this.showError('オンライン対戦を開始できませんでした。ページを再読み込みしてお試しください。');
     }
   }
@@ -174,5 +189,6 @@ export class OnlineUI {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true; this.unsubscribe?.(); this.session?.dispose(); this.assignment = undefined;
+    this.releaseRoleLock?.(); this.releaseRoleLock = undefined;
   }
 }

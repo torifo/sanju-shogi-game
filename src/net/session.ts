@@ -53,11 +53,11 @@ export class OnlineSession {
     this.storage = options.storage === undefined ? localRoomStorage : options.storage;
     let saved: SavedRoom | null = null;
     try {
-      const raw = this.storage?.load(this.roomKey);
-      if (isSavedRoom(raw)) saved = structuredClone(raw);
+      const raw = this.storage?.load(this.roomKey, options.role);
+      if (isSavedRoom(raw) && raw.role === options.role) saved = structuredClone(raw);
     } catch { /* Storage must never prevent a game. */ }
     if (saved && saved.sync.layers !== options.config.layers) throw new Error('保存された部屋の層数が異なります');
-    this.role = saved?.role ?? options.role;
+    this.role = options.role;
     this.transport = options.transport;
     this.hostColorChoice = options.hostColorChoice ?? 'random';
     this.game = saved ? gameFromSync(saved.sync) : new Game(options.config);
@@ -158,7 +158,10 @@ export class OnlineSession {
     if (msg.type === 'error') { this.fail(msg.reason, false); return; }
     if (msg.type === 'hello') {
       if (msg.protocol !== 1) { this.fail(VERSION); return; }
-      if (!this.connected || msg.role === this.role || msg.layers !== this.game.config.layers) { this.fail(MISMATCH); return; }
+      if (msg.role === this.role) {
+        this.fail('同じ役割の端末どうしがつながりました。招待リンクは作成者以外の人が開いてください'); return;
+      }
+      if (!this.connected || msg.layers !== this.game.config.layers) { this.fail(MISMATCH); return; }
       this.greeted = true;
       if (this.role === 'host') {
         this.myColor ??= this.hostColorChoice === 'random'

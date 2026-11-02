@@ -22,7 +22,7 @@ export interface StorageLike {
   removeItem(key: string): void;
 }
 export interface RoomStorage {
-  load(key: string): SavedRoom | null;
+  load(key: string, role?: Role): SavedRoom | null;
   save(key: string, state: SavedRoom): void;
   clear(key: string): void;
 }
@@ -48,17 +48,41 @@ export function isSavedRoom(raw: unknown): raw is SavedRoom {
 
 /** Accessing globalThis.localStorage itself can throw (e.g. denied browser storage). */
 export function saveRoom(key: string, state: SavedRoom, storage?: StorageLike): void {
-  try { (storage ?? globalThis.localStorage)?.setItem(prefix + key, JSON.stringify(state)); } catch { /* Best effort. */ }
+  try { (storage ?? globalThis.localStorage)?.setItem(`${prefix}${key}:${state.role}`, JSON.stringify(state)); } catch { /* Best effort. */ }
 }
-export function loadRoom(key: string, storage?: StorageLike): SavedRoom | null {
+/** Without a role, prefer the host save when deciding how to enter an invitation. */
+export function loadRoom(key: string, storage?: StorageLike, role?: Role): SavedRoom | null {
   try {
-    const text = (storage ?? globalThis.localStorage)?.getItem(prefix + key);
-    if (!text) return null;
-    const raw: unknown = JSON.parse(text);
-    return isSavedRoom(raw) ? raw : null;
+    const target = storage ?? globalThis.localStorage;
+    const read = (name: string): SavedRoom | null => {
+      try {
+        const text = target?.getItem(name);
+        const raw: unknown = text ? JSON.parse(text) : null;
+        return isSavedRoom(raw) ? raw : null;
+      } catch { return null; }
+    };
+    const legacy = read(prefix + key);
+    if (legacy) {
+      const name = `${prefix}${key}:${legacy.role}`;
+      // A newer role-specific save wins. Never discard the old save if writing fails.
+      try {
+        if (read(name)?.role !== legacy.role) target?.setItem(name, JSON.stringify(legacy));
+        target?.removeItem(prefix + key);
+      } catch { /* Still restore the legacy save when storage is read-only. */ }
+    }
+    for (const candidate of role ? [role] : ['host', 'guest'] as const) {
+      const saved = read(`${prefix}${key}:${candidate}`);
+      if (saved?.role === candidate) return saved;
+      if (legacy?.role === candidate) return legacy;
+    }
+    return null;
   } catch { return null; }
 }
 export function clearRoom(key: string, storage?: StorageLike): void {
-  try { (storage ?? globalThis.localStorage)?.removeItem(prefix + key); } catch { /* Best effort. */ }
+  for (const suffix of ['', ':host', ':guest']) {
+    try { (storage ?? globalThis.localStorage)?.removeItem(prefix + key + suffix); } catch { /* Best effort. */ }
+  }
 }
-export const localRoomStorage: RoomStorage = { load: loadRoom, save: saveRoom, clear: clearRoom };
+export const localRoomStorage: RoomStorage = {
+  load: (key, role) => loadRoom(key, undefined, role), save: saveRoom, clear: clearRoom,
+};

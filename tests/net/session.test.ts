@@ -58,6 +58,14 @@ describe('偽Transport', () => {
 });
 
 describe('OnlineSession', () => {
+  it.each(['host', 'guest'] as const)('helloで両者が%sなら役割の重複を伝えて中断する', async role => {
+    const pair = createMemoryPair();
+    const a = new OnlineSession({ role, transport: pair[0], config: SANJU, roomKey: key, storage: null });
+    const b = new OnlineSession({ role, transport: pair[1], config: SANJU, roomKey: key, storage: null });
+    await vi.waitFor(() => expect([a.status, b.status]).toEqual(['error', 'error']));
+    expect(a.error).toBe('同じ役割の端末どうしがつながりました。招待リンクは作成者以外の人が開いてください');
+    expect(b.error).toBe(a.error); a.dispose(); b.dispose();
+  });
   it.each(['sente', 'gote', 'random'] as const)('接続と色の割り当て: %s', async choice => {
     const { host, guest } = await connected(choice);
     expect(host.myColor).not.toBe(guest.myColor);

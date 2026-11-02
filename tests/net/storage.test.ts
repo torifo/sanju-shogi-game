@@ -16,7 +16,7 @@ function store() {
   const raw: StorageLike = {
     getItem: k => data.get(k) ?? null, setItem: (k, v) => { data.set(k, v); }, removeItem: k => { data.delete(k); },
   };
-  const adapter: RoomStorage = { load: k => loadRoom(k, raw), save: (k, v) => saveRoom(k, v, raw), clear: k => clearRoom(k, raw) };
+  const adapter: RoomStorage = { load: (k, role) => loadRoom(k, raw, role), save: (k, v) => saveRoom(k, v, raw), clear: k => clearRoom(k, raw) };
   return { data, raw, adapter };
 }
 const tick = () => new Promise(resolve => setTimeout(resolve, 10));
@@ -37,12 +37,38 @@ describe('部屋の保存', () => {
   it('部屋ごとのキーで保存・読み込み・削除し、コピーを返す', () => {
     const { raw, data } = store();
     saveRoom(key, empty, raw);
-    expect(data.has(`sanju-shogi:online:${key}`)).toBe(true);
+    expect(data.has(`sanju-shogi:online:${key}:host`)).toBe(true);
     expect(loadRoom(key, raw)).toEqual(empty);
     const restored = loadRoom(key, raw)!; restored.role = 'guest';
     expect(loadRoom(key, raw)?.role).toBe('host');
     saveRoom('BBBBBBBBBBBBBBBBBBBBBB', empty, raw); clearRoom(key, raw);
     expect(loadRoom(key, raw)).toBeNull(); expect(data.size).toBe(1);
+  });
+  it('同じ部屋のhostとguestを別々に保存し、指定した役割だけ読み込む', () => {
+    const { raw } = store(); const guest: SavedRoom = { ...empty, role: 'guest', myColor: 'gote' };
+    saveRoom(key, empty, raw);
+    expect(loadRoom(key, raw, 'guest')).toBeNull();
+    saveRoom(key, guest, raw);
+    expect(loadRoom(key, raw, 'host')).toEqual(empty); expect(loadRoom(key, raw, 'guest')).toEqual(guest);
+    expect(loadRoom(key, raw)?.role).toBe('host');
+    clearRoom(key, raw); expect(loadRoom(key, raw)).toBeNull();
+  });
+  it.each(['host', 'guest'] as const)('旧キーの%sを同じ役割のキーへ移行する', role => {
+    const { raw, data } = store(); const saved = { ...empty, role };
+    data.set(`sanju-shogi:online:${key}`, JSON.stringify(saved));
+    expect(loadRoom(key, raw, role)).toEqual(saved);
+    expect(data.has(`sanju-shogi:online:${key}`)).toBe(false);
+    expect(JSON.parse(data.get(`sanju-shogi:online:${key}:${role}`)!)).toEqual(saved);
+    expect(loadRoom(key, raw, role === 'host' ? 'guest' : 'host')).toBeNull();
+  });
+  it('移行時に新形式の保存を上書きせず、書込不能でも旧データを読み込む', () => {
+    const { raw, data } = store(); const newer = { ...empty, myColor: 'sente' as const };
+    data.set(`sanju-shogi:online:${key}`, JSON.stringify(empty)); saveRoom(key, newer, raw);
+    expect(loadRoom(key, raw, 'host')).toEqual(newer);
+    data.clear(); data.set(`sanju-shogi:online:${key}`, JSON.stringify(empty));
+    const readOnly = { ...raw, setItem() { throw Error('quota'); } };
+    expect(loadRoom(key, readOnly, 'host')).toEqual(empty);
+    expect(data.has(`sanju-shogi:online:${key}`)).toBe(true);
   });
   it('使用不能・容量超過・不正JSON・非対応バージョンでも例外を出さない', () => {
     const broken = { getItem() { throw Error('denied'); }, setItem() { throw Error('quota'); }, removeItem() { throw Error('denied'); } };
@@ -63,6 +89,14 @@ describe('部屋の保存', () => {
     await vi.waitFor(() => expect(guest.status).toBe('placing'));
     host.dispose(); guest.dispose();
   });
+  it('注入した保存先が異なる役割を返しても、指定された役割を上書きしない', async () => {
+    const pair = createMemoryPair();
+    const host = new OnlineSession({ role: 'host', hostColorChoice: 'sente', roomKey: key, config: SANJU, transport: pair[0], storage: null });
+    const guest = new OnlineSession({ role: 'guest', roomKey: key, config: SANJU, transport: pair[1],
+      storage: { load: () => empty, save() {}, clear() {} } });
+    await vi.waitFor(() => expect(guest.status).toBe('placing'));
+    expect(guest.role).toBe('guest'); expect(guest.myColor).toBe('gote'); host.dispose(); guest.dispose();
+  });
 });
 
 describe('切断と再開', () => {
@@ -73,7 +107,7 @@ describe('切断と再開', () => {
     expect(saved.setup?.assignment).toEqual(assignment); expect(saved.setup?.hash).toMatch(/^[a-f0-9]{64}$/);
     f.host.dispose(); await vi.waitFor(() => expect(f.guest.status).toBe('disconnected'));
     const replacement = f.room.connect(); const send = vi.spyOn(replacement, 'send');
-    const host = new OnlineSession({ role: 'guest', hostColorChoice: 'gote', roomKey: key, config: SANJU, transport: replacement, storage: f.a.adapter });
+    const host = new OnlineSession({ role: 'host', hostColorChoice: 'gote', roomKey: key, config: SANJU, transport: replacement, storage: f.a.adapter });
     await vi.waitFor(() => expect(host.status).toBe('waiting-commit'));
     expect(host.role).toBe('host'); expect(host.myColor).toBe('sente');
     expect(f.a.adapter.load(key)?.setup?.salt).toBe(saved.setup?.salt);
@@ -163,8 +197,8 @@ describe('切断と再開', () => {
     const expected = structuredClone(f.host.game.phase);
     f.host.dispose(); f.guest.dispose();
     const pair = createMemoryPair();
-    const host = new OnlineSession({ role: 'guest', roomKey: key, config: SANJU, transport: pair[0], storage: f.a.adapter });
-    const guest = new OnlineSession({ role: 'host', roomKey: key, config: SANJU, transport: pair[1], storage: f.b.adapter });
+    const host = new OnlineSession({ role: 'host', roomKey: key, config: SANJU, transport: pair[0], storage: f.a.adapter });
+    const guest = new OnlineSession({ role: 'guest', roomKey: key, config: SANJU, transport: pair[1], storage: f.b.adapter });
     const send = vi.spyOn(pair[0], 'send');
     await vi.waitFor(() => expect([host.status, guest.status]).toEqual(['ended', 'ended']));
     expect(host.game.phase).toEqual(expected); expect(host.game.position).toEqual(guest.game.position);
